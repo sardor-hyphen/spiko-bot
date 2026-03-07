@@ -186,7 +186,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, use
     
     keyboard = [
         [KeyboardButton("📱 Open App", web_app=web_app)],
-        [KeyboardButton("📊 Progress"), KeyboardButton("📝 Tasks")]
+        [KeyboardButton("📊 Progress"), KeyboardButton("📝 Tasks")],
+        [KeyboardButton("💳 Buy Credits / Contact Admin")]
     ]
     
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -195,7 +196,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, use
     if update.message:
         await update.message.reply_text(msg, reply_markup=reply_markup)
     elif update.callback_query:
-         # If coming from callback, we need to send a new message for ReplyKeyboardMarkup
+        # If coming from callback, we need to send a new message for ReplyKeyboardMarkup
         await context.bot.send_message(chat_id=user.telegram_id, text=msg, reply_markup=reply_markup)
 
 @robust_handler
@@ -705,6 +706,29 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Main Setup ---
 
+@robust_handler
+@rate_limit
+async def buy_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Opens a link to purchase credits via the admin contact."""
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "💬 Chat with Admin (@sardor_ubaydiy)",
+            url="https://t.me/sardor_ubaydiy"
+        )]
+    ])
+    await update.message.reply_text(
+        "💳 *Purchase Credits*\n\n"
+        "Credits are 5,000 UZS each.\n\n"
+        "📦 Available Packages:\n"
+        "• Starter — 5 credits — 25,000 UZS\n"
+        "• Standard — 12 credits — 60,000 UZS\n"
+        "• Pro — 30 credits — 150,000 UZS\n\n"
+        "Contact the admin on Telegram to purchase:",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+
+
 def setup_handlers(application: Application):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("generate_token", generate_token_handler))
@@ -718,6 +742,7 @@ def setup_handlers(application: Application):
     
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), progress_handler))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), tasks_handler))
+    application.add_handler(MessageHandler(filters.Regex("^💳 Buy Credits / Contact Admin$"), buy_credits_handler))
     
     # Handle text messages for token input (must be last to avoid conflicts)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
