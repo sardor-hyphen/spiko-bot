@@ -4,6 +4,7 @@ import logging
 import datetime
 import hmac
 import hashlib
+import requests
 from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 import jwt
@@ -450,14 +451,273 @@ async def task_analytics_callback(update: Update, context: ContextTypes.DEFAULT_
         
         await query.edit_message_text(msg, parse_mode='Markdown')
 
+# --- Token Management Handlers (Teacher & Student) ---
+
+@robust_handler
+@rate_limit
+async def generate_token_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teacher command: /generate_token - Creates a one-time invite token for students."""
+    telegram_user = update.effective_user
+    
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await update.message.reply_text("Please /start first to register.")
+            return
+            
+        if not user.is_teacher:
+            await update.message.reply_text("❌ This command is only for teachers.")
+            return
+        
+        # Show token generation options
+        keyboard = [
+            [
+                InlineKeyboardButton("👥 Small Class (10 users, 7 days)", callback_data="token_gen_small"),
+                InlineKeyboardButton("📊 Medium Class (30 users, 30 days)", callback_data="token_gen_medium"),
+            ],
+            [
+                InlineKeyboardButton("🏢 Large Group (100 users, 90 days)", callback_data="token_gen_large"),
+                InlineKeyboardButton("⚙️ Custom", callback_data="token_gen_custom"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "🔐 **Generate Student Invite Token**\n\n"
+            "Select token configuration:\n"
+            "• Small: 10 max students, expires in 7 days\n"
+            "• Medium: 30 max students, expires in 30 days\n"
+            "• Large: 100 max students, expires in 90 days\n"
+            "• Custom: Configure your own limits",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+@robust_handler
+@rate_limit
+async def token_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle token generation with preset or custom options."""
+    query = update.callback_query
+    await query.answer()
+    
+    telegram_user = query.from_user
+    option = query.data.split("_")[2]  # small, medium, large, or custom
+    
+    # Define presets
+    presets = {
+        "small": {"max_uses": 10, "expires_in_days": 7},
+        "medium": {"max_uses": 30, "expires_in_days": 30},
+        "large": {"max_uses": 100, "expires_in_days": 90},
+    }
+    
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await query.edit_message_text("❌ User not found. Please /start first.")
+            return
+        
+        if option == "custom":
+            # Start conversation for custom values
+            context.user_data['generating_custom_token'] = True
+            await query.edit_message_text(
+                "Enter custom token settings in format: `max_users days`\n"
+                "Example: `25 14` (25 students, expires in 14 days)\n\n"
+                "Reply with your settings:"
+            )
+            return
+        
+        # Use preset
+        if option not in presets:
+            await query.edit_message_text("❌ Invalid option.")
+            return
+        
+        config_data = presets[option]
+        await _call_backend_token_generation(query, user, config_data)
+
+async def _call_backend_token_generation(query, user: User, config_data: dict):
+    """Call backend API to generate the token."""
+    try:
+        # Get JWT token for backend authentication
+        payload = {
+            'user_id': user.id,
+            'is_teacher': True,
+            'exp': datetime.utcnow() + timedelta(hours=1)
+        }
+        jwt_token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
+        
+        response = requests.post(
+            f"{config.BACKEND_API_URL}/teacher/generate_token",
+            json={
+                "max_uses": config_data["max_uses"],
+                "expires_in_days": config_data["expires_in_days"]
+            },
+            headers={"Authorization": f"Bearer {jwt_token}"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get("token")
+            
+            msg = f"✅ **Token Generated Successfully!**\n\n"
+            msg += f"🔑 Token: `{token}`\n\n"
+            msg += f"📊 Settings:\n"
+            msg += f"• Max Students: {config_data['max_uses']}\n"
+            msg += f"• Expires: {config_data['expires_in_days']} days\n\n"
+            msg += f"📋 Share this token with your students.\n"
+            msg += f"They can use the `/join_teacher` command to join."
+            
+            await query.edit_message_text(msg, parse_mode='Markdown')
+        else:
+            error_msg = response.json().get("error", "Unknown error")
+            await query.edit_message_text(f"❌ Failed to generate token: {error_msg}")
+            
+    except requests.exceptions.Timeout:
+        await query.edit_message_text("⏱️ Request timeout. Please try again.")
+    except Exception as e:
+        logger.error(f"Token generation error: {e}")
+        await query.edit_message_text(f"❌ Error: {str(e)}")
+
+@robust_handler
+@rate_limit
+async def join_teacher_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Student command: /join_teacher - Join a teacher using a token."""
+    telegram_user = update.effective_user
+    
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await update.message.reply_text("Please /start first to register.")
+            return
+        
+        if user.is_teacher:
+            await update.message.reply_text("❌ Teachers cannot join other teachers.")
+            return
+        
+        # Prompt for token
+        context.user_data['joining_teacher'] = True
+        await update.message.reply_text(
+            "👨‍🏫 **Join a Teacher's Group**\n\n"
+            "Please send the invitation token from your teacher:\n\n"
+            "_Send the token code now:_",
+            parse_mode='Markdown'
+        )
+
+@robust_handler
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages (custom token settings, join token)."""
+    telegram_user = update.effective_user
+    message_text = update.message.text
+    
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        
+        # Handle custom token generation
+        if context.user_data.get('generating_custom_token'):
+            context.user_data['generating_custom_token'] = False
+            
+            try:
+                parts = message_text.split()
+                if len(parts) != 2:
+                    await update.message.reply_text("❌ Invalid format. Use: `max_users days`")
+                    return
+                
+                max_users = int(parts[0])
+                expires_days = int(parts[1])
+                
+                if max_users < 1 or max_users > 1000:
+                    await update.message.reply_text("❌ Max users must be between 1 and 1000.")
+                    return
+                
+                if expires_days < 1 or expires_days > 365:
+                    await update.message.reply_text("❌ Expiration days must be between 1 and 365.")
+                    return
+                
+                config_data = {"max_uses": max_users, "expires_in_days": expires_days}
+                
+                # Call backend
+                payload = {
+                    'user_id': user.id,
+                    'is_teacher': True,
+                    'exp': datetime.utcnow() + timedelta(hours=1)
+                }
+                jwt_token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
+                
+                response = requests.post(
+                    f"{config.BACKEND_API_URL}/teacher/generate_token",
+                    json=config_data,
+                    headers={"Authorization": f"Bearer {jwt_token}"},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    token = data.get("token")
+                    msg = f"✅ **Token Generated!**\n\n"
+                    msg += f"🔑 Token: `{token}`\n"
+                    msg += f"👥 Max Students: {max_users}\n"
+                    msg += f"📅 Expires: {expires_days} days"
+                    await update.message.reply_text(msg, parse_mode='Markdown')
+                else:
+                    await update.message.reply_text("❌ Failed to generate token.")
+                    
+            except ValueError:
+                await update.message.reply_text("❌ Invalid input. Use: `max_users days` (numbers only)")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error: {str(e)}")
+        
+        # Handle join teacher token
+        elif context.user_data.get('joining_teacher'):
+            context.user_data['joining_teacher'] = False
+            token = message_text.strip()
+            
+            try:
+                payload = {
+                    'user_id': user.id,
+                    'is_teacher': False,
+                    'exp': datetime.utcnow() + timedelta(hours=1)
+                }
+                jwt_token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
+                
+                response = requests.post(
+                    f"{config.BACKEND_API_URL}/teacher/join",
+                    json={"teacher_token": token},
+                    headers={"Authorization": f"Bearer {jwt_token}"},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    teacher = data.get("teacher", {})
+                    msg = f"✅ **Successfully Joined!**\n\n"
+                    msg += f"👨‍🏫 Teacher: {teacher.get('username', 'Unknown')}\n"
+                    msg += f"📧 Email: {teacher.get('email', 'N/A')}\n\n"
+                    msg += "You can now receive assignments and feedback from your teacher!"
+                    await update.message.reply_text(msg, parse_mode='Markdown')
+                else:
+                    error_msg = response.json().get("error", "Invalid or expired token")
+                    await update.message.reply_text(f"❌ {error_msg}")
+                    
+            except requests.exceptions.Timeout:
+                await update.message.reply_text("⏱️ Request timeout. Please try again.")
+            except Exception as e:
+                logger.error(f"Join teacher error: {e}")
+                await update.message.reply_text(f"❌ Error: {str(e)}")
+
 # --- Main Setup ---
 
 def setup_handlers(application: Application):
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("generate_token", generate_token_handler))
+    application.add_handler(CommandHandler("join_teacher", join_teacher_handler))
+    
     application.add_handler(CallbackQueryHandler(role_callback, pattern="^role_"))
     application.add_handler(CallbackQueryHandler(student_progress_detail_callback, pattern="^prog_stu_"))
     application.add_handler(CallbackQueryHandler(class_overall_progress_callback, pattern="^prog_class_overall"))
     application.add_handler(CallbackQueryHandler(task_analytics_callback, pattern="^task_ana_"))
+    application.add_handler(CallbackQueryHandler(token_gen_callback, pattern="^token_gen_"))
     
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), progress_handler))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), tasks_handler))
+    
+    # Handle text messages for token input (must be last to avoid conflicts)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))

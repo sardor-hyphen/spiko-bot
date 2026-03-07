@@ -18,6 +18,9 @@ class Config:
 
     # 2. The URL of your React Frontend (for the "Open App" button)
     FRONTEND_URL = os.getenv("FRONTEND_URL", "https://speeko.onrender.com")
+    
+    # 3. The URL of the Backend API
+    BACKEND_API_URL = os.getenv("BACKEND_API_URL", "https://spiko-final-backend.onrender.com/api")
 
     SECRET_KEY = os.getenv("SECRET_KEY", "speeko-neural-master-key-2024")
 
