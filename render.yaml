@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: spiko-bot
+    runtime: docker
+    repo: https://github.com/sardor-hyphen/spiko-bot
+    branch: main
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: WEB_APP_URL
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
