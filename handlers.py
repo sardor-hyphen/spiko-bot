@@ -187,7 +187,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, use
     keyboard = [
         [KeyboardButton("📱 Open App", web_app=web_app)],
         [KeyboardButton("📊 Progress"), KeyboardButton("📝 Tasks")],
-        [KeyboardButton("💳 Buy Credits / Contact Admin")]
+        [KeyboardButton("❓ How To"), KeyboardButton("💳 Buy Credits / Contact Admin")]
     ]
     
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -727,6 +727,39 @@ async def buy_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode='Markdown',
         reply_markup=keyboard
     )
+async def how_to_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the How To button - shows quick guide."""
+    try:
+        # Read the student guide
+        with open('STUDENT_GUIDE.md', 'r', encoding='utf-8') as f:
+            guide_content = f.read()
+        
+        # Convert to emoji-filled short version
+        lines = guide_content.strip().split('\n')
+        short_guide = "❓ **How To Use Spiko** ❓\n\n"
+        short_guide += "🔐 **Login:**\n"
+        short_guide += "1️⃣ Go to login page (ask teacher for URL)\n"
+        short_guide += "2️⃣ Select 'Student' role\n"
+        short_guide += "3️⃣ Choose Google or Telegram login\n"
+        short_guide += "✅ Account created automatically!\n\n"
+        
+        short_guide += "👨‍🏫 **Add Teacher Token:**\n"
+        short_guide += "1️⃣ Go to Settings ⚙️\n"
+        short_guide += "2️⃣ Find 'Teacher Connection'\n"
+        short_guide += "3️⃣ Click 'Join Teacher'\n"
+        short_guide += "4️⃣ Enter token from teacher\n"
+        short_guide += "5️⃣ Click 'Connect' ✅\n\n"
+        
+        short_guide += "🎯 **Ready to practice!**\n"
+        short_guide += "Tasks will appear once connected to teacher 📚"
+        
+        await update.message.reply_text(short_guide, parse_mode='Markdown')
+        
+    except FileNotFoundError:
+        await update.message.reply_text("❌ Guide not found. Please contact admin.")
+    except Exception as e:
+        logger.error(f"How To handler error: {e}")
+        await update.message.reply_text("❌ Error loading guide. Try again later.")
 
 
 def setup_handlers(application: Application):
@@ -742,6 +775,7 @@ def setup_handlers(application: Application):
     
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), progress_handler))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), tasks_handler))
+    application.add_handler(MessageHandler(filters.Regex("^❓ How To$"), how_to_handler))
     application.add_handler(MessageHandler(filters.Regex("^💳 Buy Credits / Contact Admin$"), buy_credits_handler))
     
     # Handle text messages for token input (must be last to avoid conflicts)
