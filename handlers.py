@@ -140,7 +140,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = await get_user_by_telegram_id(session, telegram_user.id)
         
         if user:
-            # User exists, show main menu
+            # User exists, show main menu with a switch role hint
+            await update.message.reply_text(
+                f"Welcome back {telegram_user.first_name}! You are currently logged in as { 'Teacher' if user.is_teacher else 'Student' }.\n" \
+                "Use /switchrole to change this role at any time."
+            )
             await show_main_menu(update, context, user)
         else:
             # New user, ask for role
@@ -174,9 +178,43 @@ async def role_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     async for session in get_db_session():
         user = await create_or_update_user(session, telegram_user, role)
-        
-        await query.edit_message_text(f"Role set to: {role.capitalize()}!")
+
+        # Provide extra clarity on logout and role switching
+        msg = f"Role set to: {role.capitalize()}!"
+        msg += "\n\n" if role else ""
+        msg += "You can use /switchrole any time to change your role."
+        await query.edit_message_text(msg)
         await show_main_menu(update, context, user)
+
+
+async def how_to_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles howto role callback selection."""
+    query = update.callback_query
+    await query.answer()
+
+    content_map = {
+        'howto_teacher': (
+            '👨‍🏫 *Teacher How-To Guide*\n\n'
+            '1️⃣ Open App and log in via Telegram.\n'
+            '2️⃣ On first login, select *Teacher* role.\n'
+            '3️⃣ In web app, go to *Tasks* to create modules and assign to students.\n'
+            '4️⃣ Use *Analytics* to review class/individual progress.\n'
+            '5️⃣ If you terminate the session, use /switchrole in bot to re-select role.\n\n'
+            '💡 Tip: Each student completion refunds one credit to your balance.'
+        ),
+        'howto_student': (
+            '👨‍🎓 *Student How-To Guide*\n\n'
+            '1️⃣ Open App and log in via Telegram.\n'
+            '2️⃣ On first login, select *Student* role.\n'
+            '3️⃣ Join teacher with invite token from teacher settings.\n'
+            '4️⃣ In web app, go to *Tasks* and do assigned work.\n'
+            '5️⃣ Complete task to get AI feedback and preserve progress.\n\n'
+            '💡 Tip: Tap *Practice* for speech/writing workouts, and *Analytics* to track your score growth.'
+        )
+    }
+
+    text = content_map.get(query.data, '❌ Unknown selection. Please use /switchrole or /start to try again.')
+    await query.edit_message_text(text, parse_mode='Markdown')
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user: User):
     """Displays the main menu based on user role."""
@@ -198,6 +236,25 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, use
     elif update.callback_query:
         # If coming from callback, we need to send a new message for ReplyKeyboardMarkup
         await context.bot.send_message(chat_id=user.telegram_id, text=msg, reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def switch_role_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allows existing users to choose teacher/student again."""
+    telegram_user = update.effective_user
+
+    keyboard = [
+        [
+            InlineKeyboardButton("👨‍🏫 Teacher", callback_data="role_teacher"),
+            InlineKeyboardButton("👨‍🎓 Student", callback_data="role_student"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "Alright, let’s reset your role. Please choose your new role:",
+        reply_markup=reply_markup
+    )
 
 @robust_handler
 @rate_limit
@@ -728,42 +785,26 @@ async def buy_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=keyboard
     )
 async def how_to_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the How To button - shows quick guide."""
+    """Handles the How To button - shows role selection for user guide."""
     try:
-        # Read the student guide
-        with open('STUDENT_GUIDE.md', 'r', encoding='utf-8') as f:
-            guide_content = f.read()
-        
-        # Convert to emoji-filled short version
-        lines = guide_content.strip().split('\n')
-        short_guide = "❓ **How To Use Spiko** ❓\n\n"
-        short_guide += "🔐 **Login:**\n"
-        short_guide += "1️⃣ Go to login page (ask teacher for URL)\n"
-        short_guide += "2️⃣ Select 'Student' role\n"
-        short_guide += "3️⃣ Choose Google or Telegram login\n"
-        short_guide += "✅ Account created automatically!\n\n"
-        
-        short_guide += "👨‍🏫 **Add Teacher Token:**\n"
-        short_guide += "1️⃣ Go to Settings ⚙️\n"
-        short_guide += "2️⃣ Find 'Teacher Connection'\n"
-        short_guide += "3️⃣ Click 'Join Teacher'\n"
-        short_guide += "4️⃣ Enter token from teacher\n"
-        short_guide += "5️⃣ Click 'Connect' ✅\n\n"
-        
-        short_guide += "🎯 **Ready to practice!**\n"
-        short_guide += "Tasks will appear once connected to teacher 📚"
-        
-        await update.message.reply_text(short_guide, parse_mode='Markdown')
-        
-    except FileNotFoundError:
-        await update.message.reply_text("❌ Guide not found. Please contact admin.")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👨‍🏫 Teacher Guide", callback_data="howto_teacher")],
+            [InlineKeyboardButton("👨‍🎓 Student Guide", callback_data="howto_student")],
+        ])
+        await update.message.reply_text(
+            "📘 **How To Use Spiko**\n\nChoose your account type to get a tailored walk-through:",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
     except Exception as e:
         logger.error(f"How To handler error: {e}")
-        await update.message.reply_text("❌ Error loading guide. Try again later.")
+        await update.message.reply_text("❌ Error preparing guide options. Try again later.")
 
 
 def setup_handlers(application: Application):
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("switchrole", switch_role_handler))
+    application.add_handler(CallbackQueryHandler(how_to_callback, pattern="^howto_"))
     application.add_handler(CommandHandler("generate_token", generate_token_handler))
     application.add_handler(CommandHandler("join_teacher", join_teacher_handler))
     
