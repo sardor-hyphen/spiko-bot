@@ -284,7 +284,7 @@ async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Select a student to view progress:", reply_markup=reply_markup)
             
         else:
-            # Student: Show concise progress card
+            # Student: Show comprehensive real progress
             total_tasks_result = await session.execute(
                 select(func.count(TaskAssignment.id)).where(TaskAssignment.student_id == user.id)
             )
@@ -299,6 +299,25 @@ async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             percentage = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
             
+            # Calculate average score from completed assignments
+            avg_score_res = await session.execute(
+                select(func.avg(AssessmentScore.overall_score))
+                .join(SessionUsage, AssessmentScore.session_usage_id == SessionUsage.id)
+                .where(SessionUsage.user_id == user.id)
+            )
+            avg_score = avg_score_res.scalar() or 0.0
+            
+            # Count practice sessions
+            practice_sessions_res = await session.execute(
+                select(func.count(SessionUsage.id)).where(SessionUsage.user_id == user.id)
+            )
+            practice_sessions = practice_sessions_res.scalar() or 0
+            
+            # Calculate total practice time (assuming 15 minutes per session)
+            total_minutes = practice_sessions * 15
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            
             # Next pending module/task
             next_task_result = await session.execute(
                 select(Task).join(TaskAssignment).where(
@@ -307,13 +326,18 @@ async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             next_task = next_task_result.scalars().first()
             
-            msg = f"📊 **Your Progress**\n\n"
-            msg += f"Completion: {percentage:.1f}%\n"
-            msg += f"Completed Modules: {completed_tasks}/{total_tasks}\n"
+            msg = f"📊 **Your Real Progress**\n\n"
+            msg += f"📈 *Completion Rate:* {percentage:.1f}%\n"
+            msg += f"✅ *Modules Completed:* {completed_tasks}/{total_tasks}\n"
+            msg += f"⭐ *Average Score:* {avg_score:.1f}/9.0\n"
+            msg += f"🎯 *Practice Sessions:* {practice_sessions}\n"
+            msg += f"⏱️ *Total Practice Time:* {hours}h {minutes}m\n\n"
+            
             if next_task:
-                msg += f"Next Up: {next_task.title} (Due: {next_task.due_date.strftime('%Y-%m-%d')})"
+                msg += f"📌 *Next Task:* {next_task.title}\n"
+                msg += f"📅 *Due Date:* {next_task.due_date.strftime('%Y-%m-%d')}"
             else:
-                msg += "All caught up! 🎉"
+                msg += "🎉 *All tasks completed!*"
                 
             await update.message.reply_markdown(msg)
 
@@ -358,7 +382,11 @@ async def student_progress_detail_callback(update: Update, context: ContextTypes
         msg += f"Avg Score: {avg_score:.1f}\n"
         msg += f"Last Active: {student.last_login.strftime('%Y-%m-%d %H:%M') if student.last_login else 'Never'}"
         
-        await query.edit_message_text(msg, parse_mode='Markdown')
+        # Add inline keyboard with back button
+        keyboard = [[InlineKeyboardButton("⬅️ Go Back", callback_data="progress_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
 @robust_handler
 @rate_limit
@@ -405,7 +433,11 @@ async def class_overall_progress_callback(update: Update, context: ContextTypes.
         msg += f"On Track: {on_track} 🟢\n"
         msg += f"Behind: {behind} 🔴"
         
-        await query.edit_message_text(msg, parse_mode='Markdown')
+        # Add inline keyboard with back button
+        keyboard = [[InlineKeyboardButton("⬅️ Go Back", callback_data="progress_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
 
 @robust_handler
@@ -507,7 +539,11 @@ async def task_analytics_callback(update: Update, context: ContextTypes.DEFAULT_
         msg += f"Due Date: {task.due_date.strftime('%Y-%m-%d')}\n"
         msg += f"Submissions: {subs}/{total}\n"
         
-        await query.edit_message_text(msg, parse_mode='Markdown')
+        # Add inline keyboard with back button
+        keyboard = [[InlineKeyboardButton("⬅️ Go Back", callback_data="tasks_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
 # --- Token Management Handlers (Teacher & Student) ---
 
@@ -784,6 +820,51 @@ async def buy_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode='Markdown',
         reply_markup=keyboard
     )
+
+@robust_handler
+@rate_limit
+async def tasks_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for the 'Go Back' button from task analytics."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Call the tasks handler again to show the tasks list
+    # We need to pass the user from the query
+    telegram_user = query.from_user
+    
+    # Simulate calling tasks_handler with the same parameters
+    # We'll create a mock update object with the callback query
+    mock_update = type('MockUpdate', (), {})()
+    mock_update.effective_user = telegram_user
+    mock_update.message = type('MockMessage', (), {})()
+    mock_update.message.reply_text = lambda text, reply_markup=None: query.edit_message_text(text=text, reply_markup=reply_markup)
+    mock_update.callback_query = query
+    
+    # Call tasks handler
+    await tasks_handler(mock_update, context)
+
+@robust_handler
+@rate_limit
+async def progress_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for the 'Go Back' button from student progress detail."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Call the progress handler again to show the progress menu
+    # We need to pass the user from the query
+    telegram_user = query.from_user
+    
+    # Simulate calling progress_handler with the same parameters
+    # We'll create a mock update object with the callback query
+    mock_update = type('MockUpdate', (), {})()
+    mock_update.effective_user = telegram_user
+    mock_update.message = type('MockMessage', (), {})()
+    mock_update.message.reply_text = lambda text, reply_markup=None: query.edit_message_text(text=text, reply_markup=reply_markup)
+    mock_update.callback_query = query
+    
+    # Call progress handler
+    await progress_handler(mock_update, context)
+
 async def how_to_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the How To button - shows role selection for user guide."""
     try:
@@ -813,6 +894,8 @@ def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(class_overall_progress_callback, pattern="^prog_class_overall"))
     application.add_handler(CallbackQueryHandler(task_analytics_callback, pattern="^task_ana_"))
     application.add_handler(CallbackQueryHandler(token_gen_callback, pattern="^token_gen_"))
+    application.add_handler(CallbackQueryHandler(tasks_back_callback, pattern="^tasks_back"))
+    application.add_handler(CallbackQueryHandler(progress_back_callback, pattern="^progress_back"))
     
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), progress_handler))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), tasks_handler))
