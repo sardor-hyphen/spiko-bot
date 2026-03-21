@@ -14,3 +14,8 @@ services:
         sync: false
       - key: SECRET_KEY
         generateValue: true
+      - key: PORT
+        value: "10000"
+    healthCheckPath: /health
+    env:
+      NODE_ENV: production
