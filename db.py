@@ -59,11 +59,24 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 async def check_db_health() -> bool:
     """
     Performs a simple query to verify database connectivity.
+    Includes retry logic and better error handling.
     """
-    try:
-        async with AsyncSessionLocal() as session:
-            await session.execute(text("SELECT 1"))
-        return True
-    except Exception as e:
-        logger.error(f"Database health check failed: {e}")
-        return False
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with AsyncSessionLocal() as session:
+                # Use a simple query that tests both connectivity and basic functionality
+                result = await session.execute(text("SELECT 1 as test"))
+                test_value = result.scalar()
+                if test_value == 1:
+                    logger.info(f"Database health check passed (attempt {attempt + 1})")
+                    return True
+        except Exception as e:
+            logger.warning(f"Database health check failed (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                logger.error(f"Database health check failed after {max_retries} attempts")
+                return False
+            # Wait before retrying
+            await asyncio.sleep(1)
+    
+    return False

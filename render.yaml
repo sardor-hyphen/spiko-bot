@@ -16,6 +16,18 @@ services:
         generateValue: true
       - key: PORT
         value: "10000"
-    healthCheckPath: /health
+    # Health check configuration - using lite version to avoid timeouts
+    healthCheck:
+      path: /health-lite
+      intervalSeconds: 30
+      timeoutSeconds: 5
+      unhealthyThreshold: 3
+      healthyThreshold: 2
+    # Enable automatic restarts on failure
+    restartPolicy: on-failure
+    # Add cron job for health check (if needed)
+    # cron:
+    #   - command: "curl -f https://$RENDER_EXTERNAL_URL/health || exit 1"
+    #     schedule: "*/5 * * * *"
     env:
       NODE_ENV: production

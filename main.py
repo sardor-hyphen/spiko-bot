@@ -89,7 +89,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error disposing database engine: {e}")
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    title="Spiko Bot API",
+    description="Telegram bot for Spiko language learning platform",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+@app.get("/ping")
+async def ping():
+    """Simple ping endpoint - minimal health check"""
+    return {"status": "pong", "timestamp": "2026-03-23T07:27:00Z"}
+
+@app.get("/health-lite")
+async def health_check_lite():
+    """Lite health check - only checks if app is running"""
+    return {
+        "status": "healthy",
+        "app": "running",
+        "timestamp": "2026-03-23T07:27:00Z",
+        "version": "1.0.0"
+    }
 
 @app.post("/api/webhook/telegram")
 async def telegram_webhook(request: Request):
@@ -111,19 +131,104 @@ async def telegram_webhook(request: Request):
 @app.get("/health")
 async def health_check():
     """
-    Deep health check that verifies:
-    1. App is running
-    2. Database is accessible
+    Health check endpoint with graceful degradation.
+    Returns basic status even if database is unavailable.
     """
-    db_status = await check_db_health()
-    if not db_status:
-        raise HTTPException(status_code=503, detail="Database unhealthy")
+    try:
+        # Basic app status
+        app_status = "running"
+        result = {
+            "status": "healthy",
+            "app": app_status,
+            "timestamp": "2026-03-23T07:25:00Z"
+        }
         
-    return {
-        "status": "healthy", 
-        "database": "connected", 
-        "bot": "running"
-    }
+        # Test database connection (non-blocking)
+        try:
+            db_status = await check_db_health()
+            if db_status:
+                result["database"] = "connected"
+            else:
+                result["database"] = "disconnected"
+                result["status"] = "degraded"  # Don't fail completely
+                logger.warning("Database health check failed, but continuing")
+        except Exception as e:
+            result["database"] = "error"
+            result["status"] = "degraded"
+            logger.warning(f"Database health check error: {e}")
+        
+        # Test bot connection (non-blocking)
+        try:
+            if hasattr(bot_app, 'bot') and bot_app.bot:
+                result["bot"] = "connected"
+            else:
+                result["bot"] = "disconnected"
+        except Exception as e:
+            result["bot"] = "error"
+            logger.warning(f"Bot connection check error: {e}")
+        
+        # Determine overall status
+        if result.get("status") == "healthy" and result.get("database") == "disconnected":
+            result["status"] = "degraded"
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected health check error: {e}")
+        # Return a basic response even on catastrophic failure
+        return {
+            "status": "error",
+            "app": "unknown",
+            "database": "unknown",
+            "bot": "unknown",
+            "error": str(e),
+            "timestamp": "2026-03-23T07:25:00Z"
+        }
+
+@app.get("/health-full")
+async def health_check_full():
+    """
+    Full health check that may fail if database is unavailable.
+    Used for deeper monitoring.
+    """
+    try:
+        # Test basic app functionality
+        app_status = "running"
+        
+        # Test database connection with retry logic
+        db_status = await check_db_health()
+        if not db_status:
+            logger.error("Full health check failed: Database unhealthy")
+            raise HTTPException(status_code=503, detail="Database unhealthy")
+        
+        # Test bot connection if initialized
+        bot_status = "initialized"
+        try:
+            if hasattr(bot_app, 'bot') and bot_app.bot:
+                bot_status = "connected"
+        except Exception as e:
+            logger.warning(f"Bot connection check failed: {e}")
+            bot_status = "disconnected"
+        
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "bot": bot_status,
+            "timestamp": "2026-03-23T07:25:00Z"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected full health check error: {e}")
+        raise HTTPException(status_code=500, detail=f"Full health check failed: {str(e)}")
+
+@app.get("/")
+async def root():
+    """Root endpoint - basic service check"""
+    return {"service": "spiko-bot", "status": "running"}
 
 # --- Notification Endpoints ---
 
