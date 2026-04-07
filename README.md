@@ -53,6 +53,26 @@ This folder contains the Telegram Bot service for Spiko. It is built using `pyth
 3. **Webhook URL**: The bot automatically sets the webhook on startup to `{WEB_APP_URL}/api/webhook/telegram`. Ensure this URL is accessible.
 4. **Secret Token Rotation**: Ideally, implement a secret token check in the webhook handler for added security (optional for MVP).
 
+## Health Check Endpoints
+
+For monitoring and cron jobs:
+
+| Endpoint | Purpose | Response | Dependencies |
+|----------|---------|----------|--------------|
+| `GET /cron-health` | **Cron/Monitoring (NEW)** | `{"status": "ok"}` (always 200) | None |
+| `GET /ping` | Simple ping | `{"status": "pong", ...}` | None |
+| `GET /health-lite` | App status | `{"status": "healthy", "app": "running"}` | None |
+| `GET /health` | Full status (degraded OK) | Detailed status (always 200) | App + graceful DB/bot |
+| `GET /health-full` | Strict full check | Detailed (fails 503 if DB down) | App + DB + Bot |
+
+Test locally: `python test_simple_health.py` (tests ping, health-lite, health, cron-health).
+
+**Cron Example** (Render Cron Jobs, UptimeRobot, etc.):
+```
+curl -f https://your-bot.onrender.com/cron-health
+```
+
+
 ## Architecture Diagram
 
 ```mermaid

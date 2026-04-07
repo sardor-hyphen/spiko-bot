@@ -96,6 +96,14 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.get("/ping")
 async def ping():
     """Simple ping endpoint - minimal health check"""
@@ -224,6 +232,11 @@ async def health_check_full():
     except Exception as e:
         logger.error(f"Unexpected full health check error: {e}")
         raise HTTPException(status_code=500, detail=f"Full health check failed: {str(e)}")
+
+@app.get("/cron-health")
+async def cron_health():
+    """Ultra-minimal health check for cron jobs - always OK, no dependencies"""
+    return {"status": "ok"}
 
 @app.get("/")
 async def root():
