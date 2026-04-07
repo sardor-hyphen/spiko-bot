@@ -3,6 +3,7 @@ import uvicorn
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from telegram import Update
 from telegram.ext import ApplicationBuilder
 
