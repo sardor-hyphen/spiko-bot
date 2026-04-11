@@ -1,7 +1,8 @@
 import asyncio
 import logging
+import re
 from typing import AsyncGenerator
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse, quote_plus, parse_qs, urlencode, urlunparse
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
@@ -19,56 +20,82 @@ logger = logging.getLogger(__name__)
 # --- URL Sanitization for Aiven / Asyncpg ---
 def get_cleaned_db_url(raw_url: str) -> str:
     """
-    Standardizes the URL for async use and encodes passwords to handle 
-    special characters common in Aiven (like #, @, or :).
+    Standardizes the URL for async use, encodes passwords, 
+    and STRIPS 'sslmode' which causes asyncpg to crash.
     """
     if not raw_url:
         logger.error("DATABASE_URL is not set in environment!")
-        return "sqlite+aiosqlite:///bot.db" # Fallback
+        return "sqlite+aiosqlite:///bot.db"
 
     raw_url = raw_url.strip()
 
-    # 1. SQLAlchemy async requires the +asyncpg driver prefix
+    # 1. Handle the Protocol/Driver
     if raw_url.startswith("postgres://"):
         raw_url = raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
     elif raw_url.startswith("postgresql://"):
         raw_url = raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    elif not raw_url.startswith("postgresql+asyncpg://"):
-        # If no protocol at all, assume it's meant to be async postgres
-        raw_url = "postgresql+asyncpg://" + raw_url.split("://")[-1]
-
+    
+    # 2. Use URL Parsing to clean up parameters
     try:
-        # 2. Extract and encode the password to handle symbols like # or @
         parsed = urlparse(raw_url)
-        if parsed.password:
-            safe_password = quote_plus(parsed.password)
-            # Reconstruct the URL with the safe password
-            # We use replace carefully to only hit the password section
-            raw_url = raw_url.replace(f":{parsed.password}@", f":{safe_password}@", 1)
+        
+        # Handle Password Encoding (Aiven special characters)
+        password = parsed.password
+        username = parsed.username
+        hostname = parsed.hostname
+        port = parsed.port
+        path = parsed.path
+        
+        if password:
+            safe_password = quote_plus(password)
+            # Reconstruct netloc safely
+            netloc = f"{username}:{safe_password}@{hostname}"
+            if port:
+                netloc += f":{port}"
+        else:
+            netloc = parsed.netloc
 
-        # 3. Add SSL requirement (required by Aiven)
-        # asyncpg uses 'ssl=True' (or 'ssl=require')
-        if "ssl=" not in raw_url:
-            separator = "&" if "?" in raw_url else "?"
-            raw_url += f"{separator}ssl=True"
+        # 3. CLEAN THE QUERY PARAMS (The 'sslmode' fix)
+        query_params = parse_qs(parsed.query)
+        
+        # REMOVE 'sslmode' - this is what caused your crash
+        query_params.pop('sslmode', None)
+        
+        # ADD 'ssl=True' - this is what Aiven/Asyncpg needs
+        query_params['ssl'] = ['True']
+        
+        new_query = urlencode(query_params, doseq=True)
+
+        # 4. Rebuild the final URL
+        cleaned_url = urlunparse((
+            "postgresql+asyncpg",
+            netloc,
+            path,
+            parsed.params,
+            new_query,
+            parsed.fragment
+        ))
+        
+        return cleaned_url
 
     except Exception as e:
-        logger.error(f"Error while cleaning Database URL: {e}")
-    
-    return raw_url
+        logger.error(f"Critical error cleaning Database URL: {e}")
+        # Final fallback: just try a manual replace if the parser fails
+        return raw_url.replace("sslmode=require", "ssl=True")
 
-# Generate the cleaned URL for the engine
+# Generate the cleaned URL
 ASYNC_DATABASE_URL = get_cleaned_db_url(config.DATABASE_URL)
+logger.info(f"Connecting to database with cleaned async URL (password redacted)")
 
-# --- Robust Engine Configuration ---
+# --- Engine Configuration ---
 engine = create_async_engine(
     ASYNC_DATABASE_URL, 
     echo=False,
-    pool_size=20,
-    max_overflow=10,
+    pool_size=10, # Lowered slightly to be safer on free tier
+    max_overflow=5,
     pool_timeout=30,
     pool_recycle=1800,
-    pool_pre_ping=True # Checks connection health before every query
+    pool_pre_ping=True
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -87,10 +114,6 @@ class Base(DeclarativeBase):
     reraise=True
 )
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """
-    Yields a database session with automatic retry logic for connection issues.
-    Ensures rollback on error and close on exit.
-    """
     async with AsyncSessionLocal() as session:
         try:
             yield session
@@ -102,15 +125,10 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 async def check_db_health() -> bool:
-    """
-    Performs a simple query to verify database connectivity.
-    Includes retry logic and better error handling.
-    """
     max_retries = 3
     for attempt in range(max_retries):
         try:
             async with AsyncSessionLocal() as session:
-                # Use a simple query that tests connectivity
                 result = await session.execute(text("SELECT 1 as test"))
                 test_value = result.scalar()
                 if test_value == 1:
@@ -119,9 +137,6 @@ async def check_db_health() -> bool:
         except Exception as e:
             logger.warning(f"Database health check failed (attempt {attempt + 1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
-                logger.error(f"Database health check failed after {max_retries} attempts")
                 return False
-            # Wait before retrying
             await asyncio.sleep(1)
-    
     return False
