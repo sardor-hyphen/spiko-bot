@@ -5,8 +5,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from telegram import Update
-from telegram.ext import ApplicationBuilder
+# Ensure CommandHandler is imported for the custom handlers
+from telegram.ext import ApplicationBuilder, CommandHandler
 
+# Local imports
 from bot.config import config
 from bot.handlers import setup_handlers
 from bot.score_handler import score_handler
@@ -14,89 +16,96 @@ from bot.class_handler import class_handler
 from bot.db import engine, Base, check_db_health
 from bot.utils import retry_async
 
-# Configure bot handlers
-setup_handlers(bot_app)
-bot_app.add_handler(CommandHandler("score", score_handler))
-bot_app.add_handler(CommandHandler("class", class_handler))
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# ==============================================================================
+# 1. LOGGING CONFIGURATION
+# ==============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+# ==============================================================================
+# 2. BOT INITIALIZATION (Must happen before calling handlers)
+# ==============================================================================
 # Initialize bot application
 bot_app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-# Setup handlers
+# Setup standard handlers (from handlers.py)
 setup_handlers(bot_app)
 
+# Setup custom command handlers
+bot_app.add_handler(CommandHandler("score", score_handler))
+bot_app.add_handler(CommandHandler("class", class_handler))
+
+# ==============================================================================
+# 3. LIFESPAN MANAGEMENT (Startup & Shutdown)
+# ==============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- Startup ---
-    logger.info("Starting up bot service...")
+    logger.info("Starting up Spiko Bot service...")
     
     # 1. Database Connection & Migration
     try:
-        logger.info("Verifying database connection...")
-        if not await check_db_health():
-             logger.error("Initial database health check failed!")
-             # We might choose to exit here or retry, but let's try to proceed 
-             # as the robust engine has retries built-in.
+        logger.info("Verifying database connection health...")
+        db_healthy = await check_db_health()
+        if not db_healthy:
+             logger.error("Initial database health check failed! Attempting to proceed...")
         
-        # Use existing tables if available. 
-        # Base.metadata.create_all checks for existence before creating, so it's generally safe.
-        # However, to be extra safe and avoid race conditions or lock issues during deployment,
-        # we can wrap it in a try-except or just rely on SQLAlchemy's idempotency.
-        # It DOES NOT overwrite existing data.
-        logger.info("Ensuring database schema...")
+        logger.info("Syncing database schema (ensure_runtime_schema)...")
         async with engine.begin() as conn:
+            # This creates tables if they don't exist. Does NOT overwrite data.
             await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database schema sync complete.")
     except Exception as e:
         logger.critical(f"Startup failed during database initialization: {e}")
-        # In production, we might want to crash here to let the orchestrator restart us
         raise e
 
-    # 2. Bot Initialization
+    # 2. Telegram Bot Initialization
     try:
+        logger.info("Initializing Telegram Application...")
         await bot_app.initialize()
         await bot_app.start()
+        logger.info("Telegram Application started.")
     except Exception as e:
         logger.critical(f"Failed to initialize Telegram bot: {e}")
         raise e
     
     # 3. Webhook Setup
-    # Use retry logic for webhook setup as network might be flaky on startup
     webhook_url = f"{config.BOT_SERVER_URL}/api/webhook/telegram"
-    logger.info(f"Setting webhook to {webhook_url}")
+    logger.info(f"Setting webhook to: {webhook_url}")
     
     async def set_webhook():
-        await bot_app.bot.set_webhook(url=webhook_url)
+        await bot_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
         
     try:
         await retry_async(set_webhook, retries=5)
+        logger.info("Webhook successfully set.")
     except Exception as e:
         logger.error(f"Failed to set webhook after retries: {e}")
-        # Proceeding without webhook is fatal for a webhook-based bot
         raise e
 
-    yield
+    yield # --- App is running and serving requests ---
     
     # --- Shutdown ---
-    logger.info("Shutting down bot service...")
+    logger.info("Shutting down Spiko Bot service...")
     try:
-        # Remove webhook to prevent delivery failures while down (optional, sometimes better to leave it)
-        # await bot_app.bot.delete_webhook() 
-        
         await bot_app.stop()
         await bot_app.shutdown()
+        logger.info("Telegram Bot stopped.")
     except Exception as e:
         logger.error(f"Error during bot shutdown: {e}")
     
     try:
         await engine.dispose()
-        logger.info("Database engine disposed.")
+        logger.info("Database engine connections closed.")
     except Exception as e:
         logger.error(f"Error disposing database engine: {e}")
 
+# ==============================================================================
+# 4. FASTAPI APPLICATION SETUP
+# ==============================================================================
 app = FastAPI(
     title="Spiko Bot API",
     description="Telegram bot for Spiko language learning platform",
@@ -112,147 +121,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==============================================================================
+# 5. WEBHOOK & HEALTH ENDPOINTS
+# ==============================================================================
+@app.get("/")
+async def root():
+    return {"service": "spiko-bot", "status": "running", "version": "1.0.0"}
+
 @app.get("/ping")
 async def ping():
-    """Simple ping endpoint - minimal health check"""
-    return {"status": "pong", "timestamp": "2026-03-23T07:27:00Z"}
-
-@app.get("/health-lite")
-async def health_check_lite():
-    """Lite health check - only checks if app is running"""
-    return {
-        "status": "healthy",
-        "app": "running",
-        "timestamp": "2026-03-23T07:27:00Z",
-        "version": "1.0.0"
-    }
+    return {"status": "pong"}
 
 @app.post("/api/webhook/telegram")
 async def telegram_webhook(request: Request):
-    """Handle incoming Telegram updates."""
+    """Handle incoming updates from Telegram."""
     try:
         data = await request.json()
         update = Update.de_json(data, bot_app.bot)
-        # Process update in background task or await? 
-        # Awaiting is safer for now to ensure we don't drop updates if process dies,
-        # but for high load, background tasks might be needed. 
-        # python-telegram-bot handles updates async internally via process_update.
+        # Pass the update to the python-telegram-bot logic
         await bot_app.process_update(update)
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
-        # Return 200 OK to Telegram even on error to prevent retry loops for bad updates
-        return {"status": "error", "message": "Processed with errors"}
+        # We return 200 even on error so Telegram doesn't keep resending a broken update
+        return {"status": "error", "message": str(e)}
 
 @app.get("/health")
 async def health_check():
-    """
-    Health check endpoint with graceful degradation.
-    Returns basic status even if database is unavailable.
-    """
+    """Full health check including Database and Bot status."""
+    result = {
+        "status": "healthy",
+        "timestamp": "2026-03-23T07:25:00Z"
+    }
     try:
-        # Basic app status
-        app_status = "running"
-        result = {
-            "status": "healthy",
-            "app": app_status,
-            "timestamp": "2026-03-23T07:25:00Z"
-        }
+        db_ok = await check_db_health()
+        result["database"] = "connected" if db_ok else "disconnected"
+        if not db_ok: result["status"] = "degraded"
         
-        # Test database connection (non-blocking)
-        try:
-            db_status = await check_db_health()
-            if db_status:
-                result["database"] = "connected"
-            else:
-                result["database"] = "disconnected"
-                result["status"] = "degraded"  # Don't fail completely
-                logger.warning("Database health check failed, but continuing")
-        except Exception as e:
-            result["database"] = "error"
-            result["status"] = "degraded"
-            logger.warning(f"Database health check error: {e}")
-        
-        # Test bot connection (non-blocking)
-        try:
-            if hasattr(bot_app, 'bot') and bot_app.bot:
-                result["bot"] = "connected"
-            else:
-                result["bot"] = "disconnected"
-        except Exception as e:
-            result["bot"] = "error"
-            logger.warning(f"Bot connection check error: {e}")
-        
-        # Determine overall status
-        if result.get("status") == "healthy" and result.get("database") == "disconnected":
-            result["status"] = "degraded"
-        
-        return result
-        
-    except HTTPException:
-        raise
+        result["bot"] = "connected" if bot_app.bot else "disconnected"
     except Exception as e:
-        logger.error(f"Unexpected health check error: {e}")
-        # Return a basic response even on catastrophic failure
-        return {
-            "status": "error",
-            "app": "unknown",
-            "database": "unknown",
-            "bot": "unknown",
-            "error": str(e),
-            "timestamp": "2026-03-23T07:25:00Z"
-        }
+        result["status"] = "error"
+        result["error"] = str(e)
+    return result
 
-@app.get("/health-full")
-async def health_check_full():
-    """
-    Full health check that may fail if database is unavailable.
-    Used for deeper monitoring.
-    """
-    try:
-        # Test basic app functionality
-        app_status = "running"
-        
-        # Test database connection with retry logic
-        db_status = await check_db_health()
-        if not db_status:
-            logger.error("Full health check failed: Database unhealthy")
-            raise HTTPException(status_code=503, detail="Database unhealthy")
-        
-        # Test bot connection if initialized
-        bot_status = "initialized"
-        try:
-            if hasattr(bot_app, 'bot') and bot_app.bot:
-                bot_status = "connected"
-        except Exception as e:
-            logger.warning(f"Bot connection check failed: {e}")
-            bot_status = "disconnected"
-        
-        return {
-            "status": "healthy",
-            "database": "connected",
-            "bot": bot_status,
-            "timestamp": "2026-03-23T07:25:00Z"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected full health check error: {e}")
-        raise HTTPException(status_code=500, detail=f"Full health check failed: {str(e)}")
+@app.get("/health-lite")
+async def health_check_lite():
+    return {"status": "healthy", "app": "running"}
 
-@app.get("/cron-health")
-async def cron_health():
-    """Ultra-minimal health check for cron jobs - always OK, no dependencies"""
-    return {"status": "ok"}
-
-@app.get("/")
-async def root():
-    """Root endpoint - basic service check"""
-    return {"service": "spiko-bot", "status": "running"}
-
-# --- Notification Endpoints ---
-
+# ==============================================================================
+# 6. NOTIFICATION ENDPOINTS (External triggers)
+# ==============================================================================
 @app.post("/api/notify/student/assignment")
 async def notify_student_assignment(request: Request):
     try:
@@ -264,20 +182,15 @@ async def notify_student_assignment(request: Request):
         if not chat_id:
             raise HTTPException(status_code=400, detail="Missing student_telegram_id")
 
-        msg = f"🔔 **New Assignment Published!**\n\n"
-        msg += f"📝 Title: {title}\n"
-        msg += f"📅 Due: {due_date}\n\n"
-        msg += "Tap '📝 Tasks' below to view details."
+        msg = (
+            f"🔔 **New Assignment Published!**\n\n"
+            f"📝 Title: {title}\n"
+            f"📅 Due: {due_date}\n\n"
+            f"Tap '📝 Tasks' below to view details."
+        )
         
-        # Use retry for sending messages
-        async def send():
-            await bot_app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
-            
-        await retry_async(send)
+        await bot_app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
         return {"status": "sent"}
-        
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Notification error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -294,24 +207,25 @@ async def notify_teacher_submission(request: Request):
         if not chat_id:
              raise HTTPException(status_code=400, detail="Missing teacher_telegram_id")
 
-        msg = f"📨 **New Submission Received**\n\n"
-        msg += f"👤 Student: {student_name}\n"
-        msg += f"📝 Task: {title}\n"
-        msg += f"🕒 Time: {submitted_at}\n\n"
-        msg += "Check the dashboard or use /start to view progress."
+        msg = (
+            f"📨 **New Submission Received**\n\n"
+            f"👤 Student: {student_name}\n"
+            f"📝 Task: {title}\n"
+            f"🕒 Time: {submitted_at}\n\n"
+            f"Check the dashboard or use /start to view progress."
+        )
         
-        async def send():
-            await bot_app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
-            
-        await retry_async(send)
+        await bot_app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
         return {"status": "sent"}
-        
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Notification error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ==============================================================================
+# 7. EXECUTION
+# ==============================================================================
 if __name__ == "__main__":
+    # Get port from environment (Render requirement)
     port = int(os.environ.get("PORT", 8000))
+    # Note: Using the string "bot.main:app" allows for proper reload/worker management
     uvicorn.run("bot.main:app", host="0.0.0.0", port=port, reload=False)
