@@ -9,8 +9,15 @@ from telegram.ext import ApplicationBuilder
 
 from bot.config import config
 from bot.handlers import setup_handlers
+from bot.score_handler import score_handler
+from bot.class_handler import class_handler
 from bot.db import engine, Base, check_db_health
 from bot.utils import retry_async
+
+# Configure bot handlers
+setup_handlers(bot_app)
+bot_app.add_handler(CommandHandler("score", score_handler))
+bot_app.add_handler(CommandHandler("class", class_handler))
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
