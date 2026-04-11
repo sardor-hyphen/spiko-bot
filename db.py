@@ -18,64 +18,54 @@ logger = logging.getLogger(__name__)
 
 def get_bulletproof_url(raw_url: str) -> str:
     """
-    An indestructible URL cleaner.
-    Bypasses standard parsers to ensure Aiven's '#' passwords and 
-    strict asyncpg SSL requirements never cause a crash.
+    Strips ANY protocol prefix safely, encodes the password, 
+    and forces the correct asyncpg SSL format.
     """
     if not raw_url:
         logger.error("DATABASE_URL is not set!")
         return "sqlite+aiosqlite:///bot.db"
 
-    url = raw_url.strip()
-
     try:
-        # 1. Strip the protocol
-        if url.startswith("postgres://"):
-            url = url[11:]
-        elif url.startswith("postgresql://"):
-            url = url[13:]
+        # 1. Strip ANY protocol (fixes the "user=postgresql+asyncpg" bug)
+        # This splits at '://' and takes everything after it.
+        url_without_scheme = raw_url.split("://", 1)[-1]
 
-        # 2. Split credentials from the host safely
-        # We split at the LAST '@' because passwords might contain an '@'
-        cred_part, host_db_part = url.rsplit('@', 1)
+        # 2. Split credentials from the host/db
+        # rsplit('@', 1) ensures if password has '@', it breaks at the LAST one
+        cred_part, host_db_part = url_without_scheme.rsplit('@', 1)
 
-        # 3. Split username and password safely
-        # We split at the FIRST ':'
+        # 3. Split username and password
         username, raw_password = cred_part.split(':', 1)
 
-        # 4. URL-encode the password to make '#' and '@' safe for SQLAlchemy
+        # 4. URL-encode the password to make '#' and '@' safe
         safe_password = quote_plus(raw_password)
 
-        # 5. Clean the host and database path
-        # This completely obliterates the old '?sslmode=require' or any fragments
-        host_db_path = host_db_part.split('?')[0]
-        host_db_path = host_db_path.split('#')[0]
+        # 5. Clean the host and database path (Obliterates '?sslmode=require')
+        host_db_path = host_db_part.split('?')[0].split('#')[0]
 
-        # 6. Rebuild the perfect asyncpg URL from scratch
-        # We use `ssl=require` which asyncpg strictly validates
+        # 6. Rebuild the perfect asyncpg URL
         perfect_url = f"postgresql+asyncpg://{username}:{safe_password}@{host_db_path}?ssl=require"
         
         return perfect_url
 
     except Exception as e:
         logger.critical(f"Failed to parse database URL: {e}")
-        # If it somehow fails, return a raw string with the asyncpg prefix added
-        fallback = raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
-        return fallback.replace("sslmode=", "ssl=")
+        # Let it crash loudly here rather than failing silently later
+        raise ValueError(f"Could not parse DATABASE_URL: {e}")
 
 # Generate the pristine URL
 ASYNC_DATABASE_URL = get_bulletproof_url(config.DATABASE_URL)
-logger.info("Database URL parsed and locked in for asyncpg.")
+logger.info("Database URL parsed successfully.")
 
 # --- Engine Configuration ---
 engine = create_async_engine(
     ASYNC_DATABASE_URL, 
     echo=False,
-    pool_size=10,        # Safe for Aiven Free Tier
-    max_overflow=5,      # Safe buffer
+    pool_size=10,        
+    max_overflow=5,      
     pool_timeout=30,
-    pool_recycle=1800,   # Refreshes connections every 30 mins
-    pool_pre_ping=True   # Vital: Checks connection health before use
+    pool_recycle=1800,   
+    pool_pre_ping=True   
 )
 
 AsyncSessionLocal = async_sessionmaker(
