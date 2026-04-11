@@ -5,7 +5,7 @@ from bot.db import get_db_session
 from bot.models import User, TaskAssignment, AssessmentScore, SessionUsage
 
 async def class_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    \"\"\"Teacher class overview.\"\"\"
+    ##\"Teacher class overview.\"\"\"
     telegram_user = update.effective_user
     async for session in get_db_session():
         result = await session.execute(select(User).where(User.telegram_id == str(telegram_user.id)))

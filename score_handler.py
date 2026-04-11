@@ -7,7 +7,7 @@ from bot.models import User, AssessmentScore, SessionUsage
 logger = logging.getLogger(__name__)
 
 async def score_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    \"\"\"Quick score command.\"\"\"
+    #\"\"Quick score command.\"\"\"
     telegram_user = update.effective_user
     async for session in get_db_session():
         result = await session.execute(select(User).where(User.telegram_id == str(telegram_user.id)))
