@@ -193,7 +193,7 @@ async def notify_student_assignment(request: Request):
         )
 
         # Import needed functions
-        from bot.handlers import generate_webapp_url, get_user_by_telegram_id
+        from bot.shared_utils import generate_webapp_url, get_user_by_telegram_id
         from bot.db import get_db_session
 
         # Get user and generate webapp URL

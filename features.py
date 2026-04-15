@@ -36,7 +36,7 @@ from bot.config import config
 from bot.db import get_db_session, AsyncSessionLocal
 from bot.models import User, Task, TaskAssignment, TaskModule, AssessmentScore, SessionUsage
 from bot.utils import rate_limit, robust_handler
-from bot.handlers import generate_webapp_url, get_user_by_telegram_id
+from bot.shared_utils import generate_webapp_url, get_user_by_telegram_id
 
 # Enable logging
 logger = logging.getLogger(__name__)

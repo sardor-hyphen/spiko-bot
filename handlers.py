@@ -31,6 +31,7 @@ from bot.config import config
 from bot.db import get_db_session, AsyncSessionLocal
 from bot.models import User, Task, TaskAssignment, TaskModule, AssessmentScore, SessionUsage
 from bot.utils import rate_limit, robust_handler
+from bot.shared_utils import get_user_by_telegram_id, generate_webapp_url
 
 # Import additional UX features
 from bot.features import *
@@ -63,79 +64,7 @@ def validate_telegram_data(init_data: str, bot_token: str) -> bool:
     except Exception:
         return False
 
-async def get_user_by_telegram_id(session, telegram_id):
-    result = await session.execute(select(User).where(User.telegram_id == str(telegram_id)))
-    return result.scalars().first()
 
-async def create_or_update_user(session, telegram_user, role=None):
-    telegram_id = str(telegram_user.id)
-    user = await get_user_by_telegram_id(session, telegram_id)
-    
-    if not user:
-        # Create new user
-        # We need a unique username and email
-        base_username = telegram_user.username or f"user_{telegram_id}"
-        username = base_username
-        counter = 1
-        
-        # Check for existing username
-        while True:
-            result = await session.execute(select(User).where(User.username == username))
-            if not result.scalars().first():
-                break
-            username = f"{base_username}_{counter}"
-            counter += 1
-            
-        email = f"tg_{telegram_id}@spiko.local" # Placeholder email
-        
-        user = User(
-            username=username,
-            email=email,
-            telegram_id=telegram_id,
-            password_hash=secrets.token_urlsafe(32), 
-            auth_provider='telegram',
-            is_verified=True,
-            is_teacher=(role == 'teacher')
-        )
-        session.add(user)
-    else:
-        # Update existing user role if not set or if changing (optional logic)
-        # For now, we respect the DB state, but if role is explicitly passed during signup flow
-        if role:
-            user.is_teacher = (role == 'teacher')
-    
-    user.last_login = datetime.utcnow()
-    await session.commit()
-    await session.refresh(user)
-    return user
-
-def generate_webapp_url(user: User, assignment_id: str = None) -> str:
-    """
-    Generates the Web App URL with a JWT token that the Backend trusts.
-    Optional assignment_id can be passed to deep link to a specific task.
-    """
-    # 1. Prepare the payload (Must match what your Backend JWT logic expects)
-    payload = {
-        'user_id': user.id,
-        'email': user.email, # Backend might look for this
-        'is_teacher': user.is_teacher,
-        'is_admin': user.is_admin,
-        'exp': datetime.utcnow() + timedelta(days=1), # Long expiry for convenience
-        'iat': datetime.utcnow()
-    }
-
-    # 2. Sign it using the Shared Secret
-    token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
-
-    # 3. CRITICAL: Send to root "/" NOT "/login"
-    # This triggers the automatic redirection logic in App.tsx
-    url = f"{config.FRONTEND_URL}/?token={token}&provider=telegram"
-
-    # 4. Append assignment_id if provided for deep linking
-    if assignment_id:
-        url += f"&assignment={assignment_id}"
-
-    return url
 
 # --- Handlers ---
 
