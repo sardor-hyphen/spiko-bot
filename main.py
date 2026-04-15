@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 # Ensure CommandHandler is imported for the custom handlers
 from telegram.ext import ApplicationBuilder, CommandHandler
 
@@ -137,9 +137,11 @@ async def telegram_webhook(request: Request):
     """Handle incoming updates from Telegram."""
     try:
         data = await request.json()
+        logger.info(f"Received webhook update: {data}")
         update = Update.de_json(data, bot_app.bot)
         # Pass the update to the python-telegram-bot logic
         await bot_app.process_update(update)
+        logger.info("Update processed successfully")
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
@@ -178,7 +180,8 @@ async def notify_student_assignment(request: Request):
         chat_id = data.get("student_telegram_id")
         title = data.get("title")
         due_date = data.get("due_date")
-        
+        assignment_id = data.get("assignment_id")
+
         if not chat_id:
             raise HTTPException(status_code=400, detail="Missing student_telegram_id")
 
@@ -186,10 +189,28 @@ async def notify_student_assignment(request: Request):
             f"🔔 **New Assignment Published!**\n\n"
             f"📝 Title: {title}\n"
             f"📅 Due: {due_date}\n\n"
-            f"Tap '📝 Tasks' below to view details."
+            f"Choose your action below:"
         )
-        
-        await bot_app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+
+        # Import needed functions
+        from bot.handlers import generate_webapp_url, get_user_by_telegram_id
+        from bot.db import get_db_session
+
+        # Get user and generate webapp URL
+        async for session in get_db_session():
+            user = await get_user_by_telegram_id(session, chat_id)
+            if user:
+                webapp_url = generate_webapp_url(user, assignment_id)
+                keyboard = [
+                    [InlineKeyboardButton("📝 View Details", web_app=WebAppInfo(url=webapp_url))],
+                    [InlineKeyboardButton("✅ Mark Started", callback_data=f"assignment_started_{assignment_id}")],
+                    [InlineKeyboardButton("⏰ Remind Later", callback_data=f"assignment_remind_{assignment_id}")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await bot_app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown', reply_markup=reply_markup)
+            else:
+                # Fallback if user not found
+                await bot_app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
         return {"status": "sent"}
     except Exception as e:
         logger.error(f"Notification error: {e}")
