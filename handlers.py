@@ -1936,6 +1936,7 @@ async def progress_back_callback(update: Update, context: ContextTypes.DEFAULT_T
 @rate_limit
 async def menu_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the main menu callback."""
+    logger.info("menu_main_callback called")
     query = update.callback_query
     await query.answer()
 
@@ -1946,7 +1947,38 @@ async def menu_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text("Please /start first.")
             return
 
-        await show_main_menu(update, context, user)
+        # Web App Button
+        web_app = WebAppInfo(url=generate_webapp_url(user))
+
+        keyboard = [
+            [KeyboardButton("📱 Open App", web_app=web_app)],
+            [KeyboardButton("📊 Progress"), KeyboardButton("📝 Tasks")],
+            [KeyboardButton("❓ How To"), KeyboardButton("💳 Buy Credits / Contact Admin")]
+        ]
+
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+        msg = "Welcome back! Use the buttons below to navigate."
+
+        # Add inline quick access buttons
+        quick_access_keyboard = []
+        if user.is_teacher:
+            quick_access_keyboard = [
+                [InlineKeyboardButton("📊 Quick Class Stats", callback_data="quick_class_stats")],
+                [InlineKeyboardButton("⚙️ Account Settings", callback_data="quick_settings")]
+            ]
+        else:
+            quick_access_keyboard = [
+                [InlineKeyboardButton("📈 My Progress", callback_data="quick_student_progress")],
+                [InlineKeyboardButton("⚙️ Account Settings", callback_data="quick_settings")]
+            ]
+
+        inline_reply_markup = InlineKeyboardMarkup(quick_access_keyboard) if quick_access_keyboard else None
+
+        await query.edit_message_text(msg, reply_markup=inline_reply_markup)
+
+        # Set the reply keyboard
+        await context.bot.send_message(chat_id=user.telegram_id, text="", reply_markup=reply_markup)
 
 @robust_handler
 @rate_limit
