@@ -1940,45 +1940,7 @@ async def menu_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
 
-    telegram_user = query.from_user
-    async for session in get_db_session():
-        user = await get_user_by_telegram_id(session, telegram_user.id)
-        if not user:
-            await query.edit_message_text("Please /start first.")
-            return
-
-        # Web App Button
-        web_app = WebAppInfo(url=generate_webapp_url(user))
-
-        keyboard = [
-            [KeyboardButton("📱 Open App", web_app=web_app)],
-            [KeyboardButton("📊 Progress"), KeyboardButton("📝 Tasks")],
-            [KeyboardButton("❓ How To"), KeyboardButton("💳 Buy Credits / Contact Admin")]
-        ]
-
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-        msg = "Welcome back! Use the buttons below to navigate."
-
-        # Add inline quick access buttons
-        quick_access_keyboard = []
-        if user.is_teacher:
-            quick_access_keyboard = [
-                [InlineKeyboardButton("📊 Quick Class Stats", callback_data="quick_class_stats")],
-                [InlineKeyboardButton("⚙️ Account Settings", callback_data="quick_settings")]
-            ]
-        else:
-            quick_access_keyboard = [
-                [InlineKeyboardButton("📈 My Progress", callback_data="quick_student_progress")],
-                [InlineKeyboardButton("⚙️ Account Settings", callback_data="quick_settings")]
-            ]
-
-        inline_reply_markup = InlineKeyboardMarkup(quick_access_keyboard) if quick_access_keyboard else None
-
-        await query.edit_message_text(msg, reply_markup=inline_reply_markup)
-
-        # Set the reply keyboard
-        await context.bot.send_message(chat_id=user.telegram_id, text="", reply_markup=reply_markup)
+    await query.edit_message_text("Main menu accessed!")
 
 @robust_handler
 @rate_limit
@@ -2114,6 +2076,14 @@ async def help_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await how_to_handler(update, context)
 
+@robust_handler
+@rate_limit
+async def all_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catch all callback queries for debugging."""
+    query = update.callback_query
+    logger.info(f"All callback received: {query.data}")
+    await query.answer()
+
 async def how_to_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the How To button - shows interactive help topics."""
     try:
@@ -2183,6 +2153,7 @@ def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(help_troubleshooting_callback, pattern="^help_troubleshooting$"))
     application.add_handler(CallbackQueryHandler(help_tips_callback, pattern="^help_tips$"))
     application.add_handler(CallbackQueryHandler(help_menu_callback, pattern="^help_menu$"))
+    application.add_handler(CallbackQueryHandler(all_callback_handler, pattern=".*"))
 
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), lambda update, context: progress_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), lambda update, context: tasks_handler(update, context)))
