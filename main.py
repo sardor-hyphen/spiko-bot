@@ -132,14 +132,6 @@ async def root():
 async def ping():
     return {"status": "pong"}
 
-async def process_update_async(update):
-    """Process update in background."""
-    try:
-        await bot_app.process_update(update)
-        logger.info("Update processed successfully")
-    except Exception as e:
-        logger.error(f"Error processing update in background: {e}", exc_info=True)
-
 @app.post("/api/webhook/telegram")
 async def telegram_webhook(request: Request):
     """Handle incoming updates from Telegram."""
@@ -147,11 +139,12 @@ async def telegram_webhook(request: Request):
         data = await request.json()
         logger.info(f"Received webhook update: {data}")
         update = Update.de_json(data, bot_app.bot)
-        # Process update in background to respond immediately
-        asyncio.create_task(process_update_async(update))
+        # Pass the update to the python-telegram-bot logic
+        await bot_app.process_update(update)
+        logger.info("Update processed successfully")
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"Error in webhook: {e}", exc_info=True)
+        logger.error(f"Error processing webhook: {e}", exc_info=True)
         # We return 200 even on error so Telegram doesn't keep resending a broken update
         return {"status": "error", "message": str(e)}
 
