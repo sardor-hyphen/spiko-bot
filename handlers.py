@@ -27,17 +27,10 @@ from telegram.ext import (
 from sqlalchemy import select, func, and_
 from sqlalchemy.orm import selectinload
 
-import datetime
-import jwt
-import requests
 from bot.config import config
 from bot.db import get_db_session, AsyncSessionLocal
 from bot.models import User, Task, TaskAssignment, TaskModule, AssessmentScore, SessionUsage
 from bot.utils import rate_limit, robust_handler
-from bot.shared_utils import get_user_by_telegram_id, generate_webapp_url
-
-# Import additional UX features
-from bot.features import *
 
 # Enable logging
 logging.basicConfig(
@@ -67,7 +60,79 @@ def validate_telegram_data(init_data: str, bot_token: str) -> bool:
     except Exception:
         return False
 
+async def get_user_by_telegram_id(session, telegram_id):
+    result = await session.execute(select(User).where(User.telegram_id == str(telegram_id)))
+    return result.scalars().first()
 
+async def create_or_update_user(session, telegram_user, role=None):
+    telegram_id = str(telegram_user.id)
+    user = await get_user_by_telegram_id(session, telegram_id)
+    
+    if not user:
+        # Create new user
+        # We need a unique username and email
+        base_username = telegram_user.username or f"user_{telegram_id}"
+        username = base_username
+        counter = 1
+        
+        # Check for existing username
+        while True:
+            result = await session.execute(select(User).where(User.username == username))
+            if not result.scalars().first():
+                break
+            username = f"{base_username}_{counter}"
+            counter += 1
+            
+        email = f"tg_{telegram_id}@spiko.local" # Placeholder email
+        
+        user = User(
+            username=username,
+            email=email,
+            telegram_id=telegram_id,
+            password_hash=secrets.token_urlsafe(32), 
+            auth_provider='telegram',
+            is_verified=True,
+            is_teacher=(role == 'teacher')
+        )
+        session.add(user)
+    else:
+        # Update existing user role if not set or if changing (optional logic)
+        # For now, we respect the DB state, but if role is explicitly passed during signup flow
+        if role:
+            user.is_teacher = (role == 'teacher')
+    
+    user.last_login = datetime.utcnow()
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+def generate_webapp_url(user: User, assignment_id: str = None) -> str:
+    """
+    Generates the Web App URL with a JWT token that the Backend trusts.
+    Optional assignment_id can be passed to deep link to a specific task.
+    """
+    # 1. Prepare the payload (Must match what your Backend JWT logic expects)
+    payload = {
+        'user_id': user.id,
+        'email': user.email, # Backend might look for this
+        'is_teacher': user.is_teacher,
+        'is_admin': user.is_admin,
+        'exp': datetime.utcnow() + timedelta(days=1), # Long expiry for convenience
+        'iat': datetime.utcnow()
+    }
+
+    # 2. Sign it using the Shared Secret
+    token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
+
+    # 3. CRITICAL: Send to root "/" NOT "/login"
+    # This triggers the automatic redirection logic in App.tsx
+    url = f"{config.FRONTEND_URL}/?token={token}&provider=telegram"
+
+    # 4. Append assignment_id if provided for deep linking
+    if assignment_id:
+        url += f"&assignment={assignment_id}"
+
+    return url
 
 # --- Handlers ---
 
@@ -384,276 +449,135 @@ async def student_progress_detail_callback(update: Update, context: ContextTypes
 
 @robust_handler
 @rate_limit
-async def generate_token_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Teacher command: /generate_token - Creates a one-time invite token for students."""
-    telegram_user = update.effective_user
-
-    async for session in get_db_session():
-        user = await get_user_by_telegram_id(session, telegram_user.id)
-        if not user:
-            await update.message.reply_text("Please /start first to register.")
-            return
-
-        if not user.is_teacher:
-            await update.message.reply_text("❌ This command is only for teachers.")
-            return
-
-        # Show token generation options
-        keyboard = [
-            [
-                InlineKeyboardButton("👥 Small Class (10 users, 7 days)", callback_data="token_gen_small"),
-                InlineKeyboardButton("📊 Medium Class (30 users, 30 days)", callback_data="token_gen_medium"),
-            ],
-            [
-                InlineKeyboardButton("🏢 Large Group (100 users, 90 days)", callback_data="token_gen_large"),
-                InlineKeyboardButton("⚙️ Custom", callback_data="token_gen_custom"),
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "🔐 **Generate Student Invite Token**\n\n"
-            "Select token configuration:\n"
-            "• Small: 10 max students, expires in 7 days\n"
-            "• Medium: 30 max students, expires in 30 days\n"
-            "• Large: 100 max students, expires in 90 days\n"
-            "• Custom: Configure your own limits",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-
-@robust_handler
-@rate_limit
-async def token_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle token generation with preset or custom options."""
-    query = update.callback_query
-    await query.answer()
-
-    telegram_user = query.from_user
-    option = query.data.split("_")[2]  # small, medium, large, or custom
-
-    # Define presets
-    presets = {
-        "small": {"max_uses": 10, "expires_in_days": 7},
-        "medium": {"max_uses": 30, "expires_in_days": 30},
-        "large": {"max_uses": 100, "expires_in_days": 90},
-    }
-
-    async for session in get_db_session():
-        user = await get_user_by_telegram_id(session, telegram_user.id)
-        if not user:
-            await query.edit_message_text("❌ User not found. Please /start first.")
-            return
-
-        if option == "custom":
-            # Start conversation for custom values
-            context.user_data['generating_custom_token'] = True
-            await query.edit_message_text(
-                "Enter custom token settings in format: `max_users days`\n"
-                "Example: `25 14` (25 students, expires in 14 days)\n\n"
-                "Reply with your settings:"
-            )
-            return
-
-        # Use preset
-        if option not in presets:
-            await query.edit_message_text("❌ Invalid option.")
-            return
-
-        config_data = presets[option]
-        await _call_backend_token_generation(query, user, config_data)
-
-async def _call_backend_token_generation(query, user, config_data: dict):
-    """Call backend API to generate the token."""
-    try:
-        import requests
-        import datetime
-        import jwt
-        from bot.config import config
-
-        # Get JWT token for backend authentication
-        payload = {
-            'user_id': user.id,
-            'is_teacher': True,
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-        }
-        jwt_token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
-
-        response = requests.post(
-            f"{config.BACKEND_API_URL}/teacher/generate_token",
-            json={
-                "max_uses": config_data["max_uses"],
-                "expires_in_days": config_data["expires_in_days"]
-            },
-            headers={"Authorization": f"Bearer {jwt_token}"},
-            timeout=10
-        )
-
-        if response.status_code == 200:
-            data = response.json()
-            token = data.get("token")
-
-            msg = f"✅ **Token Generated Successfully!**\n\n"
-            msg += f"🔑 Token: `{token}`\n\n"
-            msg += f"📊 Settings:\n"
-            msg += f"• Max Students: {config_data['max_uses']}\n"
-            msg += f"• Expires: {config_data['expires_in_days']} days\n\n"
-            msg += f"📋 Share this token with your students.\n"
-            msg += f"They can use the `/join_teacher` command to join."
-
-            # Add action buttons
-            keyboard = [
-                [InlineKeyboardButton("📋 Copy Token", callback_data=f"token_copy_{token}")],
-                [InlineKeyboardButton("📤 Share Instructions", callback_data="token_share_help")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
-        else:
-            error_msg = response.json().get("error", "Unknown error")
-            await query.edit_message_text(f"❌ Failed to generate token: {error_msg}")
-
-    except requests.exceptions.Timeout:
-        await query.edit_message_text("⏱️ Request timeout. Please try again.")
-    except Exception as e:
-        logger.error(f"Token generation error: {e}")
-        await query.edit_message_text(f"❌ Error: {str(e)}")
-
-@robust_handler
-@rate_limit
-async def join_teacher_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Student command: /join_teacher - Join a teacher using a token."""
-    telegram_user = update.effective_user
-
-    async for session in get_db_session():
-        user = await get_user_by_telegram_id(session, telegram_user.id)
-        if not user:
-            await update.message.reply_text("Please /start first to register.")
-            return
-
-        if user.is_teacher:
-            await update.message.reply_text("❌ Teachers cannot join other teachers.")
-            return
-
-        # Prompt for token
-        context.user_data['joining_teacher'] = True
-        await update.message.reply_text(
-            "👨‍🏫 **Join a Teacher's Group**\n\n"
-            "Please send the invitation token from your teacher:\n\n"
-            "_Send the token code now:_",
-            parse_mode='Markdown'
-        )
-
-@robust_handler
-@rate_limit
-async def tasks_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for the 'Go Back' button from task analytics."""
-    query = update.callback_query
-    await query.answer()
-
-    # Call the tasks handler again to show the tasks list
-    # We need to pass the user from the query
-    telegram_user = query.from_user
-
-    # Simulate calling tasks_handler with the same parameters
-    # We'll create a mock update object with the callback query
-    mock_update = type('MockUpdate', (), {})()
-    mock_update.effective_user = telegram_user
-    mock_update.message = type('MockMessage', (), {})()
-    mock_update.message.reply_text = lambda text, reply_markup=None: query.edit_message_text(text=text, reply_markup=reply_markup)
-    mock_update.callback_query = query
-
-    # Call tasks handler
-    await tasks_handler(mock_update, context)
-
-@robust_handler
-@rate_limit
 async def class_overall_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Teacher views class overall progress."""
     query = update.callback_query
     await query.answer()
     telegram_user = query.from_user
-
+    
     async for session in get_db_session():
         user = await get_user_by_telegram_id(session, telegram_user.id)
-
+        
         # Get all students
         students_res = await session.execute(select(User).where(User.assigned_teacher_id == user.id))
         students = students_res.scalars().all()
-
+        
         if not students:
-            await query.edit_message_text("📊 **Class Stats**\n\nNo students enrolled yet.")
+            await query.edit_message_text("No students found.")
             return
-
+            
         total_completion_sum = 0
         on_track = 0
         behind = 0
-
+        
         for student in students:
-            # Simple metric: > 50% completion is on track
+            # Simple metric: > 50% completion is on track (mock logic)
             t_res = await session.execute(select(func.count(TaskAssignment.id)).where(TaskAssignment.student_id == student.id))
             t = t_res.scalar() or 0
             c_res = await session.execute(select(func.count(TaskAssignment.id)).where(and_(TaskAssignment.student_id == student.id, TaskAssignment.completed == True)))
             c = c_res.scalar() or 0
-
+            
             p = (c / t * 100) if t > 0 else 0
             total_completion_sum += p
-
-            if p >= 50:  # Threshold
+            
+            if p >= 50: # Threshold
                 on_track += 1
             else:
                 behind += 1
-
+                
         class_avg = total_completion_sum / len(students) if students else 0
-
+        
         msg = f"📊 **Class Overall Progress**\n\n"
-        msg += f"👥 Total Students: {len(students)}\n"
-        msg += f"📈 Class Avg Completion: {class_avg:.1f}%\n"
-        msg += f"🟢 On Track: {on_track}\n"
-        msg += f"🔴 Behind: {behind}"
-
+        msg += f"Class Avg Completion: {class_avg:.1f}%\n"
+        msg += f"On Track: {on_track} 🟢\n"
+        msg += f"Behind: {behind} 🔴"
+        
         # Add inline keyboard with back button
         keyboard = [[InlineKeyboardButton("⬅️ Go Back", callback_data="progress_back")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-
+        
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
 
 @robust_handler
 @rate_limit
-async def task_analytics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Teacher views specific task analytics."""
-    query = update.callback_query
-    await query.answer()
-
-    try:
-        task_id = int(query.data.split("_")[2])
-    except (IndexError, ValueError):
-        await query.edit_message_text("Invalid task selection.")
-        return
-
+async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the Tasks button."""
+    telegram_user = update.effective_user
     async for session in get_db_session():
-        task = await session.get(Task, task_id)
-        if not task:
-            await query.edit_message_text("Task not found.")
-            return
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        
+        if user.is_teacher:
+            # Teacher: Draft vs Published
+            # Simple query for tasks created by teacher
+            tasks_res = await session.execute(
+                select(Task).where(Task.teacher_id == user.id).order_by(Task.created_at.desc()).limit(10)
+            )
+            tasks = tasks_res.scalars().all()
+            
+            msg = "📋 **Assignments**\n\n"
+            keyboard = []
+            
+            for task in tasks:
+                status = "✅ Published" if task.is_active else "📝 Draft"
+                # Count submissions
+                subs_res = await session.execute(select(func.count(TaskAssignment.id)).where(and_(TaskAssignment.task_id == task.id, TaskAssignment.completed == True)))
+                subs = subs_res.scalar() or 0
+                
+                total_res = await session.execute(select(func.count(TaskAssignment.id)).where(TaskAssignment.task_id == task.id))
+                total = total_res.scalar() or 0
+                
+                msg += f"• {task.title} ({status})\n   Submissions: {subs}/{total}\n\n"
+                
+                # Add drill down button
+                keyboard.append([InlineKeyboardButton(f"Analyze: {task.title[:15]}...", callback_data=f"task_ana_{task.id}")])
+                
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_markdown(msg, reply_markup=reply_markup)
+            
+        else:
+            # Student: Completed vs Pending
+            pending_res = await session.execute(
+                select(Task).join(TaskAssignment).where(
+                    and_(TaskAssignment.student_id == user.id, TaskAssignment.completed == False)
+                ).order_by(Task.due_date.asc())
+            )
+            pending = pending_res.scalars().all()
 
-        subs_res = await session.execute(select(func.count(TaskAssignment.id)).where(and_(TaskAssignment.task_id == task.id, TaskAssignment.completed == True)))
-        subs = subs_res.scalar() or 0
-        total_res = await session.execute(select(func.count(TaskAssignment.id)).where(TaskAssignment.task_id == task.id))
-        total = total_res.scalar() or 0
+            completed_res = await session.execute(
+                select(TaskAssignment).where(
+                    and_(TaskAssignment.student_id == user.id, TaskAssignment.completed == True)
+                ).order_by(TaskAssignment.completed_at.desc()).options(selectinload(TaskAssignment.task))
+            )
+            completed_assignments = completed_res.scalars().all()
 
-        msg = f"📊 **Task Analysis: {task.title}**\n\n"
-        msg += f"Due Date: {task.due_date.strftime('%Y-%m-%d')}\n"
-        msg += f"Submissions: {subs}/{total}\n"
+            msg = "📋 **Your Tasks**\n\n"
+            msg += "**⏳ Pending:**\n"
 
-        # Add action buttons
-        keyboard = [
-            [InlineKeyboardButton("👥 View Submissions", callback_data=f"task_subs_{task_id}")],
-            [InlineKeyboardButton("🔄 Refresh Stats", callback_data=f"task_refresh_{task_id}")],
-            [InlineKeyboardButton("⬅️ Go Back", callback_data="tasks_back")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+            keyboard = []
+            if not pending:
+                msg += "None\n"
+            else:
+                for t in pending:
+                    msg += f"• {t.title} (Due: {t.due_date.strftime('%m-%d')})\n"
+                    # Add quick action button for each pending task
+                    keyboard.append([InlineKeyboardButton(f"▶️ Start: {t.title[:15]}...", callback_data=f"task_start_{t.id}")])
 
-        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+            msg += "\n**✅ Completed:**\n"
+            if not completed_assignments:
+                msg += "None\n"
+            else:
+                for a in completed_assignments:
+                    # Try to get score
+                    score_res = await session.execute(select(AssessmentScore).where(AssessmentScore.assignment_id == a.id))
+                    score = score_res.scalars().first()
+                    score_val = f"{score.overall_score:.1f}" if score else "N/A"
+                    msg += f"• {a.task.title} (Score: {score_val})\n"
+                    # Add button to view completed task details
+                    keyboard.append([InlineKeyboardButton(f"📊 Review: {a.task.title[:12]}...", callback_data=f"task_review_{a.id}")])
+
+            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+            await update.message.reply_markdown(msg, reply_markup=reply_markup)
 
 @robust_handler
 @rate_limit
@@ -700,11 +624,13 @@ async def task_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         button = InlineKeyboardButton("🌐 Open Task in App", web_app=WebAppInfo(url=webapp_url))
         keyboard = InlineKeyboardMarkup([[button]])
 
-        msg = f"🚀 **Starting Task: {task.title}**\n\n"
-        msg += f"📅 Due: {task.due_date.strftime('%Y-%m-%d')}\n\n"
-        msg += f"Tap the button below to open the task in the app:"
-
-        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=keyboard)
+        await query.edit_message_text(
+            f"🚀 **Starting Task: {task.title}**\n\n"
+            f"📅 Due: {task.due_date.strftime('%Y-%m-%d')}\n\n"
+            f"Tap the button below to open the task in the app:",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
 
 @robust_handler
 @rate_limit
@@ -747,7 +673,7 @@ async def task_review_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             msg += f"⭐ Score: {score.overall_score:.1f}/9.0\n"
             msg += f"💬 Feedback: {score.feedback or 'No feedback available'}\n"
         else:
-            msg += "⭐ Score: Not yet assessed\n"
+            msg += "⭐ Score: Not yet assessed\n\n"
 
         msg += f"🎉 **Great job on completing this task!**\n"
         msg += f"What would you like to do next?"
@@ -762,6 +688,44 @@ async def task_review_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+
+@robust_handler
+@rate_limit
+async def task_analytics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teacher views specific task analytics."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        task_id = int(query.data.split("_")[2])
+    except (IndexError, ValueError):
+        await query.edit_message_text("Invalid task selection.")
+        return
+
+    async for session in get_db_session():
+        task = await session.get(Task, task_id)
+        if not task:
+            await query.edit_message_text("Task not found.")
+            return
+            
+        subs_res = await session.execute(select(func.count(TaskAssignment.id)).where(and_(TaskAssignment.task_id == task.id, TaskAssignment.completed == True)))
+        subs = subs_res.scalar() or 0
+        total_res = await session.execute(select(func.count(TaskAssignment.id)).where(TaskAssignment.task_id == task.id))
+        total = total_res.scalar() or 0
+        
+        msg = f"📊 **Task Analysis: {task.title}**\n\n"
+        msg += f"Due Date: {task.due_date.strftime('%Y-%m-%d')}\n"
+        msg += f"Submissions: {subs}/{total}\n"
+
+        # Add action buttons
+        keyboard = [
+            [InlineKeyboardButton("👥 View Submissions", callback_data=f"task_subs_{task_id}")],
+            [InlineKeyboardButton("🔄 Refresh Stats", callback_data=f"task_refresh_{task_id}")],
+            [InlineKeyboardButton("⬅️ Go Back", callback_data="tasks_back")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
 @robust_handler
 @rate_limit
@@ -790,31 +754,29 @@ async def task_submissions_callback(update: Update, context: ContextTypes.DEFAUL
 
         # Get all assignments for this task
         assignments_res = await session.execute(
-            select(TaskAssignment).where(TaskAssignment.task_id == task_id)
-            .options(selectinload(TaskAssignment.student))
-            .order_by(TaskAssignment.completed.asc(), Task.due_date.asc())
+            select(TaskAssignment).where(TaskAssignment.task_id == task_id).options(selectinload(TaskAssignment.student))
         )
         assignments = assignments_res.scalars().all()
 
         msg = f"📋 **Submissions for: {task.title}**\n\n"
 
-        if not assignments:
-            msg += "No students assigned yet."
-        else:
-            completed_count = 0
-            for assignment in assignments:
-                status = "✅ Completed" if assignment.completed else "⏳ Pending"
-                score_text = ""
-                if assignment.completed:
-                    completed_count += 1
-                    # Get score
-                    score_res = await session.execute(
-                        select(AssessmentScore).where(AssessmentScore.assignment_id == assignment.id)
-                    )
-                    score = score_res.scalars().first()
-                    score_text = f" (Score: {score.overall_score:.1f})" if score else " (Not scored)"
+        completed_count = 0
+        for assignment in assignments:
+            status = "✅ Completed" if assignment.completed else "⏳ Pending"
+            score_text = ""
+            if assignment.completed:
+                completed_count += 1
+                # Get score
+                score_res = await session.execute(
+                    select(AssessmentScore).where(AssessmentScore.assignment_id == assignment.id)
+                )
+                score = score_res.scalars().first()
+                score_text = f" (Score: {score.overall_score:.1f})" if score else " (Not scored)"
 
-                msg += f"• {assignment.student.username}: {status}{score_text}\n"
+            msg += f"• {assignment.student.username}: {status}{score_text}\n"
+
+        if not assignments:
+            msg += "No students assigned yet.\n"
 
         keyboard = [[InlineKeyboardButton("⬅️ Back to Task", callback_data=f"task_ana_{task_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -869,6 +831,835 @@ async def task_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 @robust_handler
 @rate_limit
+async def confirm_switch_teacher_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirms switching to teacher role."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await query.edit_message_text("❌ User not found.")
+            return
+
+        if user.is_teacher:
+            await query.edit_message_text("✅ You are already a Teacher!")
+            return
+
+        # Switch role
+        user.is_teacher = True
+        await session.commit()
+
+        msg = f"✅ **Role Successfully Changed!**\n\n"
+        msg += f"You are now a **Teacher** 👨‍🏫\n\n"
+        msg += f"You can now create assignments and manage students."
+
+        keyboard = [[InlineKeyboardButton("🚀 Get Started", callback_data="start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def confirm_switch_student_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirms switching to student role."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await query.edit_message_text("❌ User not found.")
+            return
+
+        if not user.is_teacher:
+            await query.edit_message_text("✅ You are already a Student!")
+            return
+
+        # Switch role
+        user.is_teacher = False
+        await session.commit()
+
+        msg = f"✅ **Role Successfully Changed!**\n\n"
+        msg += f"You are now a **Student** 👨‍🎓\n\n"
+        msg += f"You can now receive assignments from teachers."
+
+        keyboard = [[InlineKeyboardButton("📚 View Tasks", callback_data="start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def current_role_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows current role information."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await query.edit_message_text("❌ User not found.")
+            return
+
+        role = "Teacher" if user.is_teacher else "Student"
+        role_emoji = "👨‍🏫" if user.is_teacher else "👨‍🎓"
+
+        msg = f"{role_emoji} **Current Role: {role}**\n\n"
+
+        if user.is_teacher:
+            # Teacher info
+            result = await session.execute(select(func.count(User.id)).where(User.assigned_teacher_id == user.id))
+            student_count = result.scalar() or 0
+
+            result = await session.execute(select(func.count(Task.id)).where(Task.teacher_id == user.id))
+            task_count = result.scalar() or 0
+
+            msg += f"👥 Students: {student_count}\n"
+            msg += f"📝 Assignments Created: {task_count}\n"
+            msg += f"💰 Credits: {user.subscription.mock_credits if hasattr(user, 'subscription') and user.subscription else 0}\n\n"
+            msg += f"**Teacher Features:**\n"
+            msg += f"• Create and assign tasks\n"
+            msg += f"• View student progress\n"
+            msg += f"• Generate invite tokens\n"
+            msg += f"• Access analytics"
+        else:
+            # Student info
+            result = await session.execute(select(func.count(TaskAssignment.id)).where(TaskAssignment.student_id == user.id))
+            total_tasks = result.scalar() or 0
+
+            result = await session.execute(select(func.count(TaskAssignment.id)).where(
+                and_(TaskAssignment.student_id == user.id, TaskAssignment.completed == True)
+            ))
+            completed_tasks = result.scalar() or 0
+
+            msg += f"📊 Completion Rate: {completed_tasks}/{total_tasks} tasks\n"
+            msg += f"⭐ Average Score: Calculating...\n\n"  # Could calculate this
+            msg += f"**Student Features:**\n"
+            msg += f"• Complete assignments\n"
+            msg += f"• Practice speaking/writing\n"
+            msg += f"• View progress analytics\n"
+            msg += f"• Receive teacher feedback"
+
+        keyboard = [
+            [InlineKeyboardButton("🔄 Switch Role", callback_data="switch_role_quick")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def student_tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teacher views a specific student's tasks."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        student_id = int(query.data.split("_")[2])
+    except (IndexError, ValueError):
+        await query.edit_message_text("Invalid student selection.")
+        return
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or not user.is_teacher:
+            await query.edit_message_text("❌ Only teachers can view student tasks.")
+            return
+
+        student = await session.get(User, student_id)
+        if not student or student.assigned_teacher_id != user.id:
+            await query.edit_message_text("❌ Student not found or access denied.")
+            return
+
+        # Get student's assignments
+        assignments_res = await session.execute(
+            select(TaskAssignment).where(TaskAssignment.student_id == student_id)
+            .options(selectinload(TaskAssignment.task))
+            .order_by(TaskAssignment.completed.asc(), Task.due_date.asc())
+        )
+        assignments = assignments_res.scalars().all()
+
+        msg = f"📋 **{student.username}'s Tasks**\n\n"
+
+        if not assignments:
+            msg += "No tasks assigned yet."
+        else:
+            pending = [a for a in assignments if not a.completed]
+            completed = [a for a in assignments if a.completed]
+
+            if pending:
+                msg += "**⏳ Pending:**\n"
+                for assignment in pending[:5]:  # Show first 5
+                    msg += f"• {assignment.task.title} (Due: {assignment.task.due_date.strftime('%m-%d')})\n"
+                if len(pending) > 5:
+                    msg += f"• ... and {len(pending) - 5} more\n"
+
+            if completed:
+                msg += "\n**✅ Completed:**\n"
+                for assignment in completed[-3:]:  # Show last 3
+                    msg += f"• {assignment.task.title}\n"
+
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Student", callback_data=f"prog_stu_{student_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def student_analytics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teacher views a specific student's detailed analytics."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        student_id = int(query.data.split("_")[2])
+    except (IndexError, ValueError):
+        await query.edit_message_text("Invalid student selection.")
+        return
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or not user.is_teacher:
+            await query.edit_message_text("❌ Only teachers can view student analytics.")
+            return
+
+        student = await session.get(User, student_id)
+        if not student or student.assigned_teacher_id != user.id:
+            await query.edit_message_text("❌ Student not found or access denied.")
+            return
+
+        # Get detailed analytics
+        total_sessions_res = await session.execute(select(func.count(SessionUsage.id)).where(SessionUsage.user_id == student_id))
+        total_sessions = total_sessions_res.scalar() or 0
+
+        avg_score_res = await session.execute(
+            select(func.avg(AssessmentScore.overall_score))
+            .join(SessionUsage, AssessmentScore.session_usage_id == SessionUsage.id)
+            .where(SessionUsage.user_id == student_id)
+        )
+        avg_score = avg_score_res.scalar() or 0.0
+
+        # Get practice time estimate (15 min per session)
+        practice_time_hours = (total_sessions * 15) // 60
+        practice_time_mins = (total_sessions * 15) % 60
+
+        msg = f"📊 **{student.username}'s Analytics**\n\n"
+        msg += f"🎯 Practice Sessions: {total_sessions}\n"
+        msg += f"⏱️ Estimated Practice Time: {practice_time_hours}h {practice_time_mins}m\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"📅 Member Since: {student.created_at.strftime('%Y-%m-%d') if hasattr(student, 'created_at') and student.created_at else 'Unknown'}"
+
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Student", callback_data=f"prog_stu_{student_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def student_compare_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teacher compares a student with class average."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        student_id = int(query.data.split("_")[2])
+    except (IndexError, ValueError):
+        await query.edit_message_text("Invalid student selection.")
+        return
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or not user.is_teacher:
+            await query.edit_message_text("❌ Only teachers can compare students.")
+            return
+
+        student = await session.get(User, student_id)
+        if not student or student.assigned_teacher_id != user.id:
+            await query.edit_message_text("❌ Student not found or access denied.")
+            return
+
+        # Get student's stats
+        student_tasks_res = await session.execute(select(func.count(TaskAssignment.id)).where(TaskAssignment.student_id == student_id))
+        student_tasks = student_tasks_res.scalar() or 0
+
+        student_completed_res = await session.execute(
+            select(func.count(TaskAssignment.id)).where(
+                and_(TaskAssignment.student_id == student_id, TaskAssignment.completed == True)
+            )
+        )
+        student_completed = student_completed_res.scalar() or 0
+
+        student_score_res = await session.execute(
+            select(func.avg(AssessmentScore.overall_score))
+            .join(SessionUsage, AssessmentScore.session_usage_id == SessionUsage.id)
+            .where(SessionUsage.user_id == student_id)
+        )
+        student_avg_score = student_score_res.scalar() or 0.0
+
+        # Get class stats
+        class_students_res = await session.execute(select(User.id).where(User.assigned_teacher_id == user.id))
+        class_student_ids = [row[0] for row in class_students_res.fetchall()]
+
+        if not class_student_ids:
+            await query.edit_message_text("No class data available.")
+            return
+
+        # Class completion rate
+        class_tasks_res = await session.execute(
+            select(func.count(TaskAssignment.id)).where(TaskAssignment.student_id.in_(class_student_ids))
+        )
+        class_total_tasks = class_tasks_res.scalar() or 0
+
+        class_completed_res = await session.execute(
+            select(func.count(TaskAssignment.id)).where(
+                and_(TaskAssignment.student_id.in_(class_student_ids), TaskAssignment.completed == True)
+            )
+        )
+        class_completed = class_completed_res.scalar() or 0
+
+        class_score_res = await session.execute(
+            select(func.avg(AssessmentScore.overall_score))
+            .join(SessionUsage, AssessmentScore.session_usage_id == SessionUsage.id)
+            .where(SessionUsage.user_id.in_(class_student_ids))
+        )
+        class_avg_score = class_score_res.scalar() or 0.0
+
+        # Calculate percentages
+        student_completion_pct = (student_completed / student_tasks * 100) if student_tasks > 0 else 0
+        class_completion_pct = (class_completed / class_total_tasks * 100) if class_total_tasks > 0 else 0
+
+        msg = f"⚖️ **{student.username} vs Class Average**\n\n"
+        msg += f"📊 **Completion Rate:**\n"
+        msg += f"• Student: {student_completion_pct:.1f}%\n"
+        msg += f"• Class: {class_completion_pct:.1f}%\n"
+        msg += f"• {'Above' if student_completion_pct > class_completion_pct else 'Below'} average\n\n"
+        msg += f"⭐ **Average Score:**\n"
+        msg += f"• Student: {student_avg_score:.1f}/9.0\n"
+        msg += f"• Class: {class_avg_score:.1f}/9.0\n"
+        msg += f"• {'Above' if student_avg_score > class_avg_score else 'Below'} average"
+
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Student", callback_data=f"prog_stu_{student_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def practice_quick_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows quick practice mode selection."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await query.edit_message_text("❌ Please /start first.")
+            return
+
+        if user.is_teacher:
+            await query.edit_message_text("❌ Practice mode is for students only.")
+            return
+
+        msg = f"🎯 **Quick Practice Start**\n\n"
+        msg += f"Choose your practice mode below:\n\n"
+        msg += f"🎤 **Speaking Practice**\n"
+        msg += f"• Improve pronunciation\n"
+        msg += f"• Practice conversations\n"
+        msg += f"• Get AI feedback\n\n"
+        msg += f"✍️ **Writing Practice**\n"
+        msg += f"• Enhance writing skills\n"
+        msg += f"• Grammar correction\n"
+        msg += f"• Style improvement"
+
+        keyboard = [
+            [InlineKeyboardButton("🎤 Start Speaking", callback_data="practice_speaking_start")],
+            [InlineKeyboardButton("✍️ Start Writing", callback_data="practice_writing_start")],
+            [InlineKeyboardButton("📊 Practice History", callback_data="practice_history")],
+            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def practice_speaking_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Starts speaking practice session."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or user.is_teacher:
+            await query.edit_message_text("❌ Practice mode is for students only.")
+            return
+
+        webapp_url = generate_webapp_url(user)
+        button = InlineKeyboardButton("🌐 Open Speaking Practice", web_app=WebAppInfo(url=webapp_url))
+        keyboard = InlineKeyboardMarkup([[button]])
+
+        msg = f"🎤 **Starting Speaking Practice**\n\n"
+        msg += f"Click the button below to begin your speaking practice session.\n\n"
+        msg += f"💡 **Tips:**\n"
+        msg += f"• Speak clearly into your microphone\n"
+        msg += f"• Complete the prompts for AI feedback\n"
+        msg += f"• Practice regularly for best results"
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=keyboard)
+
+@robust_handler
+@rate_limit
+async def practice_writing_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Starts writing practice session."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or user.is_teacher:
+            await query.edit_message_text("❌ Practice mode is for students only.")
+            return
+
+        webapp_url = generate_webapp_url(user)
+        button = InlineKeyboardButton("🌐 Open Writing Practice", web_app=WebAppInfo(url=webapp_url))
+        keyboard = InlineKeyboardMarkup([[button]])
+
+        msg = f"✍️ **Starting Writing Practice**\n\n"
+        msg += f"Click the button below to begin your writing practice session.\n\n"
+        msg += f"💡 **Tips:**\n"
+        msg += f"• Complete writing prompts\n"
+        msg += f"• Review AI grammar corrections\n"
+        msg += f"• Focus on different writing styles"
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=keyboard)
+
+@robust_handler
+@rate_limit
+async def practice_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows practice session history."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or user.is_teacher:
+            await query.edit_message_text("❌ Practice history is for students only.")
+            return
+
+        # Get practice session count
+        sessions_res = await session.execute(select(func.count(SessionUsage.id)).where(SessionUsage.user_id == user.id))
+        total_sessions = sessions_res.scalar() or 0
+
+        # Get average score
+        avg_score_res = await session.execute(
+            select(func.avg(AssessmentScore.overall_score))
+            .join(SessionUsage, AssessmentScore.session_usage_id == SessionUsage.id)
+            .where(SessionUsage.user_id == user.id)
+        )
+        avg_score = avg_score_res.scalar() or 0.0
+
+        msg = f"📊 **Your Practice History**\n\n"
+        msg += f"🎯 Total Sessions: {total_sessions}\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"⏱️ Estimated Practice Time: {(total_sessions * 15) // 60}h {(total_sessions * 15) % 60}m\n\n"
+
+        if total_sessions == 0:
+            msg += "Start practicing to see your progress here!"
+        else:
+            msg += "Keep up the great work! 💪"
+
+        keyboard = [
+            [InlineKeyboardButton("🎤 Speaking Practice", callback_data="practice_speaking_start")],
+            [InlineKeyboardButton("✍️ Writing Practice", callback_data="practice_writing_start")],
+            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def view_score_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows student's overall score summary."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or user.is_teacher:
+            await query.edit_message_text("❌ Score viewing is for students only.")
+            return
+
+        # Get overall stats
+        total_tasks_res = await session.execute(select(func.count(TaskAssignment.id)).where(TaskAssignment.student_id == user.id))
+        total_tasks = total_tasks_res.scalar() or 0
+
+        completed_res = await session.execute(
+            select(func.count(TaskAssignment.id)).where(
+                and_(TaskAssignment.student_id == user.id, TaskAssignment.completed == True)
+            )
+        )
+        completed = completed_res.scalar() or 0
+
+        avg_score_res = await session.execute(
+            select(func.avg(AssessmentScore.overall_score))
+            .join(SessionUsage, AssessmentScore.session_usage_id == SessionUsage.id)
+            .where(SessionUsage.user_id == user.id)
+        )
+        avg_score = avg_score_res.scalar() or 0.0
+
+        sessions_res = await session.execute(select(func.count(SessionUsage.id)).where(SessionUsage.user_id == user.id))
+        total_sessions = sessions_res.scalar() or 0
+
+        msg = f"📊 **Your Overall Performance**\n\n"
+        msg += f"📝 Task Completion: {completed}/{total_tasks} ({(completed/total_tasks*100):.1f}%)\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"🎯 Practice Sessions: {total_sessions}\n"
+        msg += f"⏱️ Practice Time: {(total_sessions * 15) // 60}h {(total_sessions * 15) % 60}m\n\n"
+
+        if avg_score >= 7.0:
+            msg += "🌟 Excellent work! Keep it up!"
+        elif avg_score >= 5.0:
+            msg += "👍 Good progress! Keep practicing!"
+        else:
+            msg += "💪 You're improving! Focus on the feedback!"
+
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def next_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Helps student find and start their next task."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or user.is_teacher:
+            await query.edit_message_text("❌ Task navigation is for students only.")
+            return
+
+        # Find next pending task
+        next_task_res = await session.execute(
+            select(Task).join(TaskAssignment).where(
+                and_(TaskAssignment.student_id == user.id, TaskAssignment.completed == False)
+            ).order_by(Task.due_date.asc()).limit(1)
+        )
+        next_task = next_task_res.scalars().first()
+
+        if next_task:
+            # Get assignment
+            assignment_res = await session.execute(
+                select(TaskAssignment).where(
+                    and_(TaskAssignment.task_id == next_task.id, TaskAssignment.student_id == user.id)
+                )
+            )
+            assignment = assignment_res.scalars().first()
+
+            webapp_url = generate_webapp_url(user)
+            button = InlineKeyboardButton(f"▶️ Start: {next_task.title[:15]}...", web_app=WebAppInfo(url=webapp_url))
+            keyboard = InlineKeyboardMarkup([[button]])
+
+            msg = f"📝 **Your Next Task**\n\n"
+            msg += f"**{next_task.title}**\n"
+            msg += f"📅 Due: {next_task.due_date.strftime('%Y-%m-%d')}\n\n"
+            msg += f"Ready to continue? Click below to start!"
+
+            await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=keyboard)
+        else:
+            msg = f"🎉 **Congratulations!**\n\n"
+            msg += f"You've completed all your assigned tasks!\n\n"
+            msg += f"Keep practicing to maintain your skills."
+
+            keyboard = [
+                [InlineKeyboardButton("🎯 Practice Speaking", callback_data="practice_speaking_start")],
+                [InlineKeyboardButton("✍️ Practice Writing", callback_data="practice_writing_start")],
+                [InlineKeyboardButton("📊 View Progress", callback_data="quick_student_progress")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+# --- Token Management Handlers (Teacher & Student) ---
+
+@robust_handler
+@rate_limit
+async def generate_token_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teacher command: /generate_token - Creates a one-time invite token for students."""
+    telegram_user = update.effective_user
+    
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await update.message.reply_text("Please /start first to register.")
+            return
+            
+        if not user.is_teacher:
+            await update.message.reply_text("❌ This command is only for teachers.")
+            return
+        
+        # Show token generation options
+        keyboard = [
+            [
+                InlineKeyboardButton("👥 Small Class (10 users, 7 days)", callback_data="token_gen_small"),
+                InlineKeyboardButton("📊 Medium Class (30 users, 30 days)", callback_data="token_gen_medium"),
+            ],
+            [
+                InlineKeyboardButton("🏢 Large Group (100 users, 90 days)", callback_data="token_gen_large"),
+                InlineKeyboardButton("⚙️ Custom", callback_data="token_gen_custom"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "🔐 **Generate Student Invite Token**\n\n"
+            "Select token configuration:\n"
+            "• Small: 10 max students, expires in 7 days\n"
+            "• Medium: 30 max students, expires in 30 days\n"
+            "• Large: 100 max students, expires in 90 days\n"
+            "• Custom: Configure your own limits",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+@robust_handler
+@rate_limit
+async def token_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle token generation with preset or custom options."""
+    query = update.callback_query
+    await query.answer()
+    
+    telegram_user = query.from_user
+    option = query.data.split("_")[2]  # small, medium, large, or custom
+    
+    # Define presets
+    presets = {
+        "small": {"max_uses": 10, "expires_in_days": 7},
+        "medium": {"max_uses": 30, "expires_in_days": 30},
+        "large": {"max_uses": 100, "expires_in_days": 90},
+    }
+    
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await query.edit_message_text("❌ User not found. Please /start first.")
+            return
+        
+        if option == "custom":
+            # Start conversation for custom values
+            context.user_data['generating_custom_token'] = True
+            await query.edit_message_text(
+                "Enter custom token settings in format: `max_users days`\n"
+                "Example: `25 14` (25 students, expires in 14 days)\n\n"
+                "Reply with your settings:"
+            )
+            return
+        
+        # Use preset
+        if option not in presets:
+            await query.edit_message_text("❌ Invalid option.")
+            return
+        
+        config_data = presets[option]
+        await _call_backend_token_generation(query, user, config_data)
+
+async def _call_backend_token_generation(query, user: User, config_data: dict):
+    """Call backend API to generate the token."""
+    try:
+        # Get JWT token for backend authentication
+        payload = {
+            'user_id': user.id,
+            'is_teacher': True,
+            'exp': datetime.utcnow() + timedelta(hours=1)
+        }
+        jwt_token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
+        
+        response = requests.post(
+            f"{config.BACKEND_API_URL}/teacher/generate_token",
+            json={
+                "max_uses": config_data["max_uses"],
+                "expires_in_days": config_data["expires_in_days"]
+            },
+            headers={"Authorization": f"Bearer {jwt_token}"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get("token")
+
+            msg = f"✅ **Token Generated Successfully!**\n\n"
+            msg += f"🔑 Token: `{token}`\n\n"
+            msg += f"📊 Settings:\n"
+            msg += f"• Max Students: {config_data['max_uses']}\n"
+            msg += f"• Expires: {config_data['expires_in_days']} days\n\n"
+            msg += f"📋 Share this token with your students.\n"
+            msg += f"They can use the `/join_teacher` command to join."
+
+            # Add action buttons
+            keyboard = [
+                [InlineKeyboardButton("📋 Copy Token", callback_data=f"token_copy_{token}")],
+                [InlineKeyboardButton("📤 Share Instructions", callback_data="token_share_help")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+        else:
+            error_msg = response.json().get("error", "Unknown error")
+            await query.edit_message_text(f"❌ Failed to generate token: {error_msg}")
+            
+    except requests.exceptions.Timeout:
+        await query.edit_message_text("⏱️ Request timeout. Please try again.")
+    except Exception as e:
+        logger.error(f"Token generation error: {e}")
+        await query.edit_message_text(f"❌ Error: {str(e)}")
+
+@robust_handler
+@rate_limit
+async def join_teacher_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Student command: /join_teacher - Join a teacher using a token."""
+    telegram_user = update.effective_user
+    
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await update.message.reply_text("Please /start first to register.")
+            return
+        
+        if user.is_teacher:
+            await update.message.reply_text("❌ Teachers cannot join other teachers.")
+            return
+        
+        # Prompt for token
+        context.user_data['joining_teacher'] = True
+        await update.message.reply_text(
+            "👨‍🏫 **Join a Teacher's Group**\n\n"
+            "Please send the invitation token from your teacher:\n\n"
+            "_Send the token code now:_",
+            parse_mode='Markdown'
+        )
+
+@robust_handler
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages (custom token settings, join token)."""
+    telegram_user = update.effective_user
+    message_text = update.message.text
+    
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        
+        # Handle custom token generation
+        if context.user_data.get('generating_custom_token'):
+            context.user_data['generating_custom_token'] = False
+            
+            try:
+                parts = message_text.split()
+                if len(parts) != 2:
+                    await update.message.reply_text("❌ Invalid format. Use: `max_users days`")
+                    return
+                
+                max_users = int(parts[0])
+                expires_days = int(parts[1])
+                
+                if max_users < 1 or max_users > 1000:
+                    await update.message.reply_text("❌ Max users must be between 1 and 1000.")
+                    return
+                
+                if expires_days < 1 or expires_days > 365:
+                    await update.message.reply_text("❌ Expiration days must be between 1 and 365.")
+                    return
+                
+                config_data = {"max_uses": max_users, "expires_in_days": expires_days}
+                
+                # Call backend
+                payload = {
+                    'user_id': user.id,
+                    'is_teacher': True,
+                    'exp': datetime.utcnow() + timedelta(hours=1)
+                }
+                jwt_token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
+                
+                response = requests.post(
+                    f"{config.BACKEND_API_URL}/teacher/generate_token",
+                    json=config_data,
+                    headers={"Authorization": f"Bearer {jwt_token}"},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    token = data.get("token")
+                    msg = f"✅ **Token Generated!**\n\n"
+                    msg += f"🔑 Token: `{token}`\n"
+                    msg += f"👥 Max Students: {max_users}\n"
+                    msg += f"📅 Expires: {expires_days} days"
+                    await update.message.reply_text(msg, parse_mode='Markdown')
+                else:
+                    await update.message.reply_text("❌ Failed to generate token.")
+                    
+            except ValueError:
+                await update.message.reply_text("❌ Invalid input. Use: `max_users days` (numbers only)")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error: {str(e)}")
+        
+        # Handle join teacher token
+        elif context.user_data.get('joining_teacher'):
+            context.user_data['joining_teacher'] = False
+            token = message_text.strip()
+            
+            try:
+                payload = {
+                    'user_id': user.id,
+                    'is_teacher': False,
+                    'exp': datetime.utcnow() + timedelta(hours=1)
+                }
+                jwt_token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
+                
+                response = requests.post(
+                    f"{config.BACKEND_API_URL}/teacher/join",
+                    json={"teacher_token": token},
+                    headers={"Authorization": f"Bearer {jwt_token}"},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    teacher = data.get("teacher", {})
+                    msg = f"✅ **Successfully Joined!**\n\n"
+                    msg += f"👨‍🏫 Teacher: {teacher.get('username', 'Unknown')}\n"
+                    msg += f"📧 Email: {teacher.get('email', 'N/A')}\n\n"
+                    msg += "You can now receive assignments and feedback from your teacher!"
+                    await update.message.reply_text(msg, parse_mode='Markdown')
+                else:
+                    error_msg = response.json().get("error", "Invalid or expired token")
+                    await update.message.reply_text(f"❌ {error_msg}")
+                    
+            except requests.exceptions.Timeout:
+                await update.message.reply_text("⏱️ Request timeout. Please try again.")
+            except Exception as e:
+                logger.error(f"Join teacher error: {e}")
+                await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# --- Main Setup ---
+
+@robust_handler
+@rate_limit
 async def token_copy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles token copy action."""
     query = update.callback_query
@@ -910,15 +1701,226 @@ async def token_share_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 @robust_handler
 @rate_limit
+async def quick_class_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows quick class statistics for teachers."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or not user.is_teacher:
+            await query.edit_message_text("❌ Only teachers can view class stats.")
+            return
+
+        # Get all students
+        students_res = await session.execute(select(User).where(User.assigned_teacher_id == user.id))
+        students = students_res.scalars().all()
+
+        if not students:
+            await query.edit_message_text("📊 **Class Stats**\n\nNo students enrolled yet.")
+            return
+
+        total_completion_sum = 0
+        on_track = 0
+        behind = 0
+
+        for student in students:
+            # Simple metric: > 50% completion is on track
+            t_res = await session.execute(select(func.count(TaskAssignment.id)).where(TaskAssignment.student_id == student.id))
+            t = t_res.scalar() or 0
+            c_res = await session.execute(select(func.count(TaskAssignment.id)).where(and_(TaskAssignment.student_id == student.id, TaskAssignment.completed == True)))
+            c = c_res.scalar() or 0
+
+            p = (c / t * 100) if t > 0 else 0
+            total_completion_sum += p
+
+            if p >= 50:  # Threshold
+                on_track += 1
+            else:
+                behind += 1
+
+        class_avg = total_completion_sum / len(students) if students else 0
+
+        msg = f"📊 **Quick Class Stats**\n\n"
+        msg += f"👥 Total Students: {len(students)}\n"
+        msg += f"📈 Class Avg Completion: {class_avg:.1f}%\n"
+        msg += f"🟢 On Track: {on_track}\n"
+        msg += f"🔴 Behind: {behind}"
+
+        keyboard = [[InlineKeyboardButton("📋 View Details", callback_data="prog_class_overall")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def quick_student_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows quick student progress."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or user.is_teacher:
+            await query.edit_message_text("❌ Only students can view personal progress.")
+            return
+
+        total_tasks_result = await session.execute(
+            select(func.count(TaskAssignment.id)).where(TaskAssignment.student_id == user.id)
+        )
+        total_tasks = total_tasks_result.scalar() or 0
+
+        completed_tasks_result = await session.execute(
+            select(func.count(TaskAssignment.id)).where(
+                and_(TaskAssignment.student_id == user.id, TaskAssignment.completed == True)
+            )
+        )
+        completed_tasks = completed_tasks_result.scalar() or 0
+
+        percentage = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+
+        # Calculate average score from completed assignments
+        avg_score_res = await session.execute(
+            select(func.avg(AssessmentScore.overall_score))
+            .join(SessionUsage, AssessmentScore.session_usage_id == SessionUsage.id)
+            .where(SessionUsage.user_id == user.id)
+        )
+        avg_score = avg_score_res.scalar() or 0.0
+
+        msg = f"📈 **Your Quick Progress**\n\n"
+        msg += f"📊 Completion Rate: {percentage:.1f}%\n"
+        msg += f"✅ Tasks Done: {completed_tasks}/{total_tasks}\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/9.0"
+
+        keyboard = [[InlineKeyboardButton("📋 View Details", callback_data="progress_menu")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def quick_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows quick settings menu."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await query.edit_message_text("❌ User not found.")
+            return
+
+        msg = f"⚙️ **Account Settings**\n\n"
+        msg += f"👤 Username: {user.username}\n"
+        msg += f"📧 Email: {user.email}\n"
+        msg += f"🎭 Role: {'Teacher' if user.is_teacher else 'Student'}\n"
+        msg += f"📅 Last Login: {user.last_login.strftime('%Y-%m-%d') if user.last_login else 'Never'}"
+
+        keyboard = [
+            [InlineKeyboardButton("🔄 Switch Role", callback_data="switch_role_quick")],
+            [InlineKeyboardButton("🌐 Open App Settings", web_app=WebAppInfo(url=generate_webapp_url(user)))]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def buy_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows credit purchase options with preset packages."""
+    telegram_user = update.effective_user
+
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        current_credits = 0
+        if user and hasattr(user, 'subscription') and user.subscription:
+            current_credits = user.subscription.mock_credits
+
+        msg = "💳 *Purchase Credits*\n\n"
+        msg += f"💰 Current Balance: {current_credits} credits\n"
+        msg += "💵 Rate: 5,000 UZS per credit\n\n"
+        msg += "📦 *Choose Your Package:*\n\n"
+
+        keyboard = [
+            [InlineKeyboardButton("💰 Starter: 5 credits (25,000 UZS)", callback_data="purchase_5")],
+            [InlineKeyboardButton("💰 Standard: 12 credits (60,000 UZS)", callback_data="purchase_12")],
+            [InlineKeyboardButton("💰 Pro: 30 credits (150,000 UZS)", callback_data="purchase_30")],
+            [InlineKeyboardButton("💬 Contact Admin (@sardor_ubaydiy)", url="https://t.me/sardor_ubaydiy")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def purchase_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles credit purchase selection."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        credits_amount = int(query.data.split("_")[1])
+    except (IndexError, ValueError):
+        await query.edit_message_text("❌ Invalid purchase option.")
+        return
+
+    # Calculate price (5,000 UZS per credit)
+    price = credits_amount * 5000
+
+    msg = f"💰 **Purchase Confirmation**\n\n"
+    msg += f"📦 Package: {credits_amount} credits\n"
+    msg += f"💵 Price: {price:,} UZS\n"
+    msg += f"💡 Rate: 5,000 UZS per credit\n\n"
+    msg += f"💬 To complete your purchase, contact the admin with this information:\n\n"
+    msg += f"• Username: @{query.from_user.username or 'N/A'}\n"
+    msg += f"• Package: {credits_amount} credits ({price:,} UZS)\n"
+    msg += f"• Telegram ID: {query.from_user.id}\n\n"
+    msg += f"Credits will be added to your account after payment confirmation."
+
+    keyboard = [
+        [InlineKeyboardButton("💬 Contact Admin Now", url="https://t.me/sardor_ubaydiy")],
+        [InlineKeyboardButton("⬅️ Back to Packages", callback_data="buy_credits")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def tasks_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for the 'Go Back' button from task analytics."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Call the tasks handler again to show the tasks list
+    # We need to pass the user from the query
+    telegram_user = query.from_user
+    
+    # Simulate calling tasks_handler with the same parameters
+    # We'll create a mock update object with the callback query
+    mock_update = type('MockUpdate', (), {})()
+    mock_update.effective_user = telegram_user
+    mock_update.message = type('MockMessage', (), {})()
+    mock_update.message.reply_text = lambda text, reply_markup=None: query.edit_message_text(text=text, reply_markup=reply_markup)
+    mock_update.callback_query = query
+    
+    # Call tasks handler
+    await tasks_handler(mock_update, context)
+
+@robust_handler
+@rate_limit
 async def progress_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for the 'Go Back' button from student progress detail."""
     query = update.callback_query
     await query.answer()
-
+    
     # Call the progress handler again to show the progress menu
     # We need to pass the user from the query
     telegram_user = query.from_user
-
+    
     # Simulate calling progress_handler with the same parameters
     # We'll create a mock update object with the callback query
     mock_update = type('MockUpdate', (), {})()
@@ -926,110 +1928,9 @@ async def progress_back_callback(update: Update, context: ContextTypes.DEFAULT_T
     mock_update.message = type('MockMessage', (), {})()
     mock_update.message.reply_text = lambda text, reply_markup=None: query.edit_message_text(text=text, reply_markup=reply_markup)
     mock_update.callback_query = query
-
+    
     # Call progress handler
     await progress_handler(mock_update, context)
-
-@robust_handler
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text messages (custom token settings, join token)."""
-    telegram_user = update.effective_user
-    message_text = update.message.text
-
-    async for session in get_db_session():
-        user = await get_user_by_telegram_id(session, telegram_user.id)
-
-        # Handle custom token generation
-        if context.user_data.get('generating_custom_token'):
-            context.user_data['generating_custom_token'] = False
-
-            try:
-                parts = message_text.split()
-                if len(parts) != 2:
-                    await update.message.reply_text("❌ Invalid format. Use: `max_users days`")
-                    return
-
-                max_users = int(parts[0])
-                expires_days = int(parts[1])
-
-                if max_users < 1 or max_users > 1000:
-                    await update.message.reply_text("❌ Max users must be between 1 and 1000.")
-                    return
-
-                if expires_days < 1 or expires_days > 365:
-                    await update.message.reply_text("❌ Expiration days must be between 1 and 365.")
-                    return
-
-                config_data = {"max_uses": max_users, "expires_in_days": expires_days}
-
-                # Call backend
-                payload = {
-                    'user_id': user.id,
-                    'is_teacher': True,
-                    'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-                }
-                jwt_token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
-
-                response = requests.post(
-                    f"{config.BACKEND_API_URL}/teacher/generate_token",
-                    json=config_data,
-                    headers={"Authorization": f"Bearer {jwt_token}"},
-                    timeout=10
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    token = data.get("token")
-                    msg = f"✅ **Token Generated!**\n\n"
-                    msg += f"🔑 Token: `{token}`\n"
-                    msg += f"👥 Max Students: {max_users}\n"
-                    msg += f"📅 Expires: {expires_days} days"
-                    await update.message.reply_text(msg, parse_mode='Markdown')
-                else:
-                    await update.message.reply_text("❌ Failed to generate token.")
-
-            except ValueError:
-                await update.message.reply_text("❌ Invalid input. Use: `max_users days` (numbers only)")
-            except Exception as e:
-                await update.message.reply_text(f"❌ Error: {str(e)}")
-
-        # Handle join teacher token
-        elif context.user_data.get('joining_teacher'):
-            context.user_data['joining_teacher'] = False
-            token = message_text.strip()
-
-            try:
-                payload = {
-                    'user_id': user.id,
-                    'is_teacher': False,
-                    'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-                }
-                jwt_token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
-
-                response = requests.post(
-                    f"{config.BACKEND_API_URL}/teacher/join",
-                    json={"teacher_token": token},
-                    headers={"Authorization": f"Bearer {jwt_token}"},
-                    timeout=10
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    teacher = data.get("teacher", {})
-                    msg = f"✅ **Successfully Joined!**\n\n"
-                    msg += f"👨‍🏫 Teacher: {teacher.get('username', 'Unknown')}\n"
-                    msg += f"📧 Email: {teacher.get('email', 'N/A')}\n\n"
-                    msg += "You can now receive assignments and feedback from your teacher!"
-                    await update.message.reply_text(msg, parse_mode='Markdown')
-                else:
-                    error_msg = response.json().get("error", "Invalid or expired token")
-                    await update.message.reply_text(f"❌ {error_msg}")
-
-            except requests.exceptions.Timeout:
-                await update.message.reply_text("⏱️ Request timeout. Please try again.")
-            except Exception as e:
-                logger.error(f"Join teacher error: {e}")
-                await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def how_to_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the How To button - shows interactive help topics."""
@@ -1062,45 +1963,26 @@ def setup_handlers(application: Application):
     application.add_handler(CommandHandler("join_teacher", join_teacher_handler))
     
     application.add_handler(CallbackQueryHandler(role_callback, pattern="^role_"))
-    application.add_handler(CallbackQueryHandler(confirm_switch_teacher_callback, pattern="^confirm_switch_teacher$"))
-    application.add_handler(CallbackQueryHandler(confirm_switch_student_callback, pattern="^confirm_switch_student$"))
-    application.add_handler(CallbackQueryHandler(current_role_info_callback, pattern="^current_role_info$"))
     application.add_handler(CallbackQueryHandler(student_progress_detail_callback, pattern="^prog_stu_"))
-    application.add_handler(CallbackQueryHandler(student_tasks_callback, pattern="^student_tasks_"))
-    application.add_handler(CallbackQueryHandler(student_analytics_callback, pattern="^student_analytics_"))
-    application.add_handler(CallbackQueryHandler(student_compare_callback, pattern="^student_compare_"))
     application.add_handler(CallbackQueryHandler(class_overall_progress_callback, pattern="^prog_class_overall"))
     application.add_handler(CallbackQueryHandler(task_analytics_callback, pattern="^task_ana_"))
     application.add_handler(CallbackQueryHandler(task_start_callback, pattern="^task_start_"))
     application.add_handler(CallbackQueryHandler(task_review_callback, pattern="^task_review_"))
     application.add_handler(CallbackQueryHandler(task_submissions_callback, pattern="^task_subs_"))
     application.add_handler(CallbackQueryHandler(task_refresh_callback, pattern="^task_refresh_"))
-    application.add_handler(CallbackQueryHandler(practice_quick_start_callback, pattern="^practice_quick_start$"))
-    application.add_handler(CallbackQueryHandler(practice_speaking_start_callback, pattern="^practice_speaking_start$"))
-    application.add_handler(CallbackQueryHandler(practice_writing_start_callback, pattern="^practice_writing_start$"))
-    application.add_handler(CallbackQueryHandler(practice_history_callback, pattern="^practice_history$"))
-    application.add_handler(CallbackQueryHandler(view_score_callback, pattern="^view_score$"))
-    application.add_handler(CallbackQueryHandler(next_task_callback, pattern="^next_task$"))
     application.add_handler(CallbackQueryHandler(token_gen_callback, pattern="^token_gen_"))
     application.add_handler(CallbackQueryHandler(token_copy_callback, pattern="^token_copy_"))
     application.add_handler(CallbackQueryHandler(token_share_callback, pattern="^token_share_"))
-    application.add_handler(CallbackQueryHandler(purchase_callback, pattern="^purchase_"))
     application.add_handler(CallbackQueryHandler(quick_class_stats_callback, pattern="^quick_class_stats$"))
     application.add_handler(CallbackQueryHandler(quick_student_progress_callback, pattern="^quick_student_progress$"))
     application.add_handler(CallbackQueryHandler(quick_settings_callback, pattern="^quick_settings$"))
-    application.add_handler(CallbackQueryHandler(help_getting_started_callback, pattern="^help_getting_started$"))
-    application.add_handler(CallbackQueryHandler(help_troubleshooting_callback, pattern="^help_troubleshooting$"))
-    application.add_handler(CallbackQueryHandler(help_tips_callback, pattern="^help_tips$"))
-    application.add_handler(CallbackQueryHandler(help_menu_callback, pattern="^help_menu$"))
-    application.add_handler(CallbackQueryHandler(assignment_started_callback, pattern="^assignment_started_"))
-    application.add_handler(CallbackQueryHandler(assignment_remind_callback, pattern="^assignment_remind_"))
     application.add_handler(CallbackQueryHandler(tasks_back_callback, pattern="^tasks_back"))
     application.add_handler(CallbackQueryHandler(progress_back_callback, pattern="^progress_back"))
     
-    application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), progress_handler))
-    application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), tasks_handler))
-    application.add_handler(MessageHandler(filters.Regex("^❓ How To$"), how_to_handler))
-    application.add_handler(MessageHandler(filters.Regex("^💳 Buy Credits / Contact Admin$"), buy_credits_handler))
+    application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), lambda update, context: progress_handler(update, context)))
+    application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), lambda update, context: tasks_handler(update, context)))
+    application.add_handler(MessageHandler(filters.Regex("^❓ How To$"), lambda update, context: how_to_handler(update, context)))
+    application.add_handler(MessageHandler(filters.Regex("^💳 Buy Credits / Contact Admin$"), lambda update, context: buy_credits_handler(update, context))
     
     # Handle text messages for token input (must be last to avoid conflicts)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: message_handler(update, context)))
