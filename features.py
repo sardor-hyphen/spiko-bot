@@ -275,7 +275,7 @@ async def student_analytics_callback(update: Update, context: ContextTypes.DEFAU
         msg = f"📊 **{student.username}'s Analytics**\n\n"
         msg += f"🎯 Practice Sessions: {total_sessions}\n"
         msg += f"⏱️ Estimated Practice Time: {practice_time_hours}h {practice_time_mins}m\n"
-        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/75\n"
         msg += f"📅 Member Since: {student.created_at.strftime('%Y-%m-%d') if hasattr(student, 'created_at') and student.created_at else 'Unknown'}"
 
         keyboard = [[InlineKeyboardButton("⬅️ Back to Student", callback_data=f"prog_stu_{student_id}")]]
@@ -364,8 +364,8 @@ async def student_compare_callback(update: Update, context: ContextTypes.DEFAULT
         msg += f"• Class: {class_completion_pct:.1f}%\n"
         msg += f"• {'Above' if student_completion_pct > class_completion_pct else 'Below'} average\n\n"
         msg += f"⭐ **Average Score:**\n"
-        msg += f"• Student: {student_avg_score:.1f}/9.0\n"
-        msg += f"• Class: {class_avg_score:.1f}/9.0\n"
+        msg += f"• Student: {student_avg_score:.1f}/75\n"
+        msg += f"• Class: {class_avg_score:.1f}/75\n"
         msg += f"• {'Above' if student_avg_score > class_avg_score else 'Below'} average"
 
         keyboard = [[InlineKeyboardButton("⬅️ Back to Student", callback_data=f"prog_stu_{student_id}")]]
@@ -498,7 +498,7 @@ async def practice_history_callback(update: Update, context: ContextTypes.DEFAUL
 
         msg = f"📊 **Your Practice History**\n\n"
         msg += f"🎯 Total Sessions: {total_sessions}\n"
-        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/75\n"
         msg += f"⏱️ Practice Time: {(total_sessions * 15) // 60}h {(total_sessions * 15) % 60}m\n\n"
 
         if total_sessions == 0:
@@ -556,7 +556,7 @@ async def view_score_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         msg = f"📊 **Your Overall Performance**\n\n"
         msg += f"📝 Task Completion: {completed}/{total_tasks} ({(completed/total_tasks*100):.1f}%)\n"
-        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/75\n"
         msg += f"🎯 Practice Sessions: {total_sessions}\n"
         msg += f"⏱️ Practice Time: {(total_sessions * 15) // 60}h {(total_sessions * 15) % 60}m\n\n"
 
@@ -762,7 +762,7 @@ async def quick_student_progress_callback(update: Update, context: ContextTypes.
         msg = f"📈 **Your Quick Progress**\n\n"
         msg += f"📊 Completion Rate: {percentage:.1f}%\n"
         msg += f"✅ Tasks Done: {completed_tasks}/{total_tasks}\n"
-        msg += f"⭐ Average Score: {avg_score:.1f}/9.0"
+        msg += f"⭐ Average Score: {avg_score:.1f}/75"
 
         keyboard = [[InlineKeyboardButton("📋 View Details", callback_data="progress_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)

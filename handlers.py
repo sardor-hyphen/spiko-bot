@@ -382,7 +382,7 @@ async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = f"📊 **Your Real Progress**\n\n"
             msg += f"📈 *Completion Rate:* {percentage:.1f}%\n"
             msg += f"✅ *Modules Completed:* {completed_tasks}/{total_tasks}\n"
-            msg += f"⭐ *Average Score:* {avg_score:.1f}/9.0\n"
+            msg += f"⭐ *Average Score:* {avg_score:.1f}/75\n"
             msg += f"🎯 *Practice Sessions:* {practice_sessions}\n"
             msg += f"⏱️ *Total Practice Time:* {hours}h {minutes}m\n\n"
             
@@ -432,7 +432,7 @@ async def student_progress_detail_callback(update: Update, context: ContextTypes
         
         msg = f"👤 **Student: {student.username}**\n\n"
         msg += f"📊 Completion Rate: {percentage:.1f}%\n"
-        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/75\n"
         msg += f"📅 Last Active: {student.last_login.strftime('%Y-%m-%d %H:%M') if student.last_login else 'Never'}\n"
         msg += f"📝 Total Tasks: {total_tasks}"
 
@@ -670,7 +670,7 @@ async def task_review_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         msg = f"📊 **Task Review: {assignment.task.title}**\n\n"
         msg += f"📅 Completed: {assignment.completed_at.strftime('%Y-%m-%d %H:%M')}\n"
         if score:
-            msg += f"⭐ Score: {score.overall_score:.1f}/9.0\n"
+            msg += f"⭐ Score: {score.overall_score:.1f}/75\n"
             msg += f"💬 Feedback: {score.feedback or 'No feedback available'}\n"
         else:
             msg += "⭐ Score: Not yet assessed\n\n"
@@ -855,7 +855,7 @@ async def confirm_switch_teacher_callback(update: Update, context: ContextTypes.
         msg += f"You are now a **Teacher** 👨‍🏫\n\n"
         msg += f"You can now create assignments and manage students."
 
-        keyboard = [[InlineKeyboardButton("🚀 Get Started", callback_data="start")]]
+        keyboard = [[InlineKeyboardButton("🚀 Get Started", callback_data="menu_main")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
@@ -886,7 +886,7 @@ async def confirm_switch_student_callback(update: Update, context: ContextTypes.
         msg += f"You are now a **Student** 👨‍🎓\n\n"
         msg += f"You can now receive assignments from teachers."
 
-        keyboard = [[InlineKeyboardButton("📚 View Tasks", callback_data="start")]]
+        keyboard = [[InlineKeyboardButton("📚 View Tasks", callback_data="menu_main")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
@@ -946,7 +946,7 @@ async def current_role_info_callback(update: Update, context: ContextTypes.DEFAU
 
         keyboard = [
             [InlineKeyboardButton("🔄 Switch Role", callback_data="switch_role_quick")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="start")]
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu_main")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1053,7 +1053,7 @@ async def student_analytics_callback(update: Update, context: ContextTypes.DEFAU
         msg = f"📊 **{student.username}'s Analytics**\n\n"
         msg += f"🎯 Practice Sessions: {total_sessions}\n"
         msg += f"⏱️ Estimated Practice Time: {practice_time_hours}h {practice_time_mins}m\n"
-        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/75\n"
         msg += f"📅 Member Since: {student.created_at.strftime('%Y-%m-%d') if hasattr(student, 'created_at') and student.created_at else 'Unknown'}"
 
         keyboard = [[InlineKeyboardButton("⬅️ Back to Student", callback_data=f"prog_stu_{student_id}")]]
@@ -1142,8 +1142,8 @@ async def student_compare_callback(update: Update, context: ContextTypes.DEFAULT
         msg += f"• Class: {class_completion_pct:.1f}%\n"
         msg += f"• {'Above' if student_completion_pct > class_completion_pct else 'Below'} average\n\n"
         msg += f"⭐ **Average Score:**\n"
-        msg += f"• Student: {student_avg_score:.1f}/9.0\n"
-        msg += f"• Class: {class_avg_score:.1f}/9.0\n"
+        msg += f"• Student: {student_avg_score:.1f}/75\n"
+        msg += f"• Class: {class_avg_score:.1f}/75\n"
         msg += f"• {'Above' if student_avg_score > class_avg_score else 'Below'} average"
 
         keyboard = [[InlineKeyboardButton("⬅️ Back to Student", callback_data=f"prog_stu_{student_id}")]]
@@ -1184,7 +1184,7 @@ async def practice_quick_start_callback(update: Update, context: ContextTypes.DE
             [InlineKeyboardButton("🎤 Start Speaking", callback_data="practice_speaking_start")],
             [InlineKeyboardButton("✍️ Start Writing", callback_data="practice_writing_start")],
             [InlineKeyboardButton("📊 Practice History", callback_data="practice_history")],
-            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start")]
+            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_main")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1272,7 +1272,7 @@ async def practice_history_callback(update: Update, context: ContextTypes.DEFAUL
 
         msg = f"📊 **Your Practice History**\n\n"
         msg += f"🎯 Total Sessions: {total_sessions}\n"
-        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/75\n"
         msg += f"⏱️ Estimated Practice Time: {(total_sessions * 15) // 60}h {(total_sessions * 15) % 60}m\n\n"
 
         if total_sessions == 0:
@@ -1283,7 +1283,7 @@ async def practice_history_callback(update: Update, context: ContextTypes.DEFAUL
         keyboard = [
             [InlineKeyboardButton("🎤 Speaking Practice", callback_data="practice_speaking_start")],
             [InlineKeyboardButton("✍️ Writing Practice", callback_data="practice_writing_start")],
-            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start")]
+            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_main")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1326,7 +1326,7 @@ async def view_score_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         msg = f"📊 **Your Overall Performance**\n\n"
         msg += f"📝 Task Completion: {completed}/{total_tasks} ({(completed/total_tasks*100):.1f}%)\n"
-        msg += f"⭐ Average Score: {avg_score:.1f}/9.0\n"
+        msg += f"⭐ Average Score: {avg_score:.1f}/75\n"
         msg += f"🎯 Practice Sessions: {total_sessions}\n"
         msg += f"⏱️ Practice Time: {(total_sessions * 15) // 60}h {(total_sessions * 15) % 60}m\n\n"
 
@@ -1337,7 +1337,7 @@ async def view_score_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             msg += "💪 You're improving! Focus on the feedback!"
 
-        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="start")]]
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="menu_main")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
@@ -1792,7 +1792,7 @@ async def quick_student_progress_callback(update: Update, context: ContextTypes.
         msg = f"📈 **Your Quick Progress**\n\n"
         msg += f"📊 Completion Rate: {percentage:.1f}%\n"
         msg += f"✅ Tasks Done: {completed_tasks}/{total_tasks}\n"
-        msg += f"⭐ Average Score: {avg_score:.1f}/9.0"
+        msg += f"⭐ Average Score: {avg_score:.1f}/75"
 
         keyboard = [[InlineKeyboardButton("📋 View Details", callback_data="progress_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1932,6 +1932,156 @@ async def progress_back_callback(update: Update, context: ContextTypes.DEFAULT_T
     # Call progress handler
     await progress_handler(mock_update, context)
 
+@robust_handler
+@rate_limit
+async def menu_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the main menu callback."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await query.edit_message_text("Please /start first.")
+            return
+
+        await show_main_menu(update, context, user)
+
+@robust_handler
+@rate_limit
+async def switch_role_quick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick switch role from settings."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user:
+            await query.edit_message_text("Please /start first.")
+            return
+
+        await switch_role_handler(update, context)
+
+@robust_handler
+@rate_limit
+async def token_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Go back to token generation menu."""
+    query = update.callback_query
+    await query.answer()
+
+    telegram_user = query.from_user
+    async for session in get_db_session():
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if not user or not user.is_teacher:
+            await query.edit_message_text("❌ Only teachers can generate tokens.")
+            return
+
+        await generate_token_handler(update, context)
+
+@robust_handler
+@rate_limit
+async def progress_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show progress menu from quick progress."""
+    query = update.callback_query
+    await query.answer()
+
+    await progress_handler(update, context)
+
+@robust_handler
+@rate_limit
+async def buy_credits_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show buy credits menu."""
+    query = update.callback_query
+    await query.answer()
+
+    await buy_credits_handler(update, context)
+
+@robust_handler
+@rate_limit
+async def help_getting_started_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show getting started help."""
+    query = update.callback_query
+    await query.answer()
+
+    msg = f"🚀 **Getting Started with Spiko**\n\n"
+    msg += f"1️⃣ Start by typing /start in the bot\n"
+    msg += f"2️⃣ Choose your role: Teacher or Student\n"
+    msg += f"3️⃣ If Teacher: Generate invite token for students\n"
+    msg += f"4️⃣ If Student: Join teacher with token\n"
+    msg += f"5️⃣ Open the web app to access full features\n\n"
+    msg += f"💡 **Pro Tips:**\n"
+    msg += f"• Use /switchrole to change roles anytime\n"
+    msg += f"• Teachers can create tasks and track progress\n"
+    msg += f"• Students can practice and complete assignments"
+
+    keyboard = [[InlineKeyboardButton("⬅️ Back to Help", callback_data="help_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def help_troubleshooting_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show troubleshooting help."""
+    query = update.callback_query
+    await query.answer()
+
+    msg = f"❓ **Common Issues & Solutions**\n\n"
+    msg += f"🔐 **Can't access app?**\n"
+    msg += f"• Make sure you're logged in via Telegram\n"
+    msg += f"• Try /start again to refresh your session\n\n"
+    msg += f"👥 **Can't join teacher?**\n"
+    msg += f"• Check token spelling and expiry\n"
+    msg += f"• Contact your teacher for a new token\n\n"
+    msg += f"📝 **Tasks not showing?**\n"
+    msg += f"• Refresh the web app\n"
+    msg += f"• Check if teacher assigned tasks\n\n"
+    msg += f"💰 **Payment issues?**\n"
+    msg += f"• Contact admin for credit purchases\n"
+    msg += f"• Include your username and amount"
+
+    keyboard = [[InlineKeyboardButton("⬅️ Back to Help", callback_data="help_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def help_tips_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show tips and tricks."""
+    query = update.callback_query
+    await query.answer()
+
+    msg = f"💡 **Tips & Tricks for Success**\n\n"
+    msg += f"🎯 **For Students:**\n"
+    msg += f"• Practice regularly to improve scores\n"
+    msg += f"• Review AI feedback carefully\n"
+    msg += f"• Complete tasks on time\n\n"
+    msg += f"👨‍🏫 **For Teachers:**\n"
+    msg += f"• Create clear, specific assignments\n"
+    msg += f"• Monitor student progress weekly\n"
+    msg += f"• Use analytics to identify improvement areas\n\n"
+    msg += f"⚡ **General Tips:**\n"
+    msg += f"• Use the web app for full functionality\n"
+    msg += f"• Keep tokens secure and don't share publicly\n"
+    msg += f"• Contact support for technical issues"
+
+    keyboard = [[InlineKeyboardButton("⬅️ Back to Help", callback_data="help_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+@robust_handler
+@rate_limit
+async def help_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help menu."""
+    query = update.callback_query
+    await query.answer()
+
+    await how_to_handler(update, context)
+
 async def how_to_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the How To button - shows interactive help topics."""
     try:
@@ -1978,7 +2128,30 @@ def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(quick_settings_callback, pattern="^quick_settings$"))
     application.add_handler(CallbackQueryHandler(tasks_back_callback, pattern="^tasks_back"))
     application.add_handler(CallbackQueryHandler(progress_back_callback, pattern="^progress_back"))
-    
+    application.add_handler(CallbackQueryHandler(student_tasks_callback, pattern="^student_tasks_"))
+    application.add_handler(CallbackQueryHandler(student_analytics_callback, pattern="^student_analytics_"))
+    application.add_handler(CallbackQueryHandler(student_compare_callback, pattern="^student_compare_"))
+    application.add_handler(CallbackQueryHandler(confirm_switch_teacher_callback, pattern="^confirm_switch_teacher$"))
+    application.add_handler(CallbackQueryHandler(confirm_switch_student_callback, pattern="^confirm_switch_student$"))
+    application.add_handler(CallbackQueryHandler(current_role_info_callback, pattern="^current_role_info$"))
+    application.add_handler(CallbackQueryHandler(view_score_callback, pattern="^view_score$"))
+    application.add_handler(CallbackQueryHandler(next_task_callback, pattern="^next_task$"))
+    application.add_handler(CallbackQueryHandler(practice_quick_start_callback, pattern="^practice_quick_start$"))
+    application.add_handler(CallbackQueryHandler(practice_speaking_start_callback, pattern="^practice_speaking_start$"))
+    application.add_handler(CallbackQueryHandler(practice_writing_start_callback, pattern="^practice_writing_start$"))
+    application.add_handler(CallbackQueryHandler(practice_history_callback, pattern="^practice_history$"))
+    application.add_handler(CallbackQueryHandler(menu_main_callback, pattern="^menu_main$"))
+    application.add_handler(CallbackQueryHandler(switch_role_quick_callback, pattern="^switch_role_quick$"))
+    application.add_handler(CallbackQueryHandler(token_share_callback, pattern="^token_share_help$"))
+    application.add_handler(CallbackQueryHandler(token_back_callback, pattern="^token_back$"))
+    application.add_handler(CallbackQueryHandler(progress_menu_callback, pattern="^progress_menu$"))
+    application.add_handler(CallbackQueryHandler(purchase_callback, pattern="^purchase_"))
+    application.add_handler(CallbackQueryHandler(buy_credits_callback, pattern="^buy_credits$"))
+    application.add_handler(CallbackQueryHandler(help_getting_started_callback, pattern="^help_getting_started$"))
+    application.add_handler(CallbackQueryHandler(help_troubleshooting_callback, pattern="^help_troubleshooting$"))
+    application.add_handler(CallbackQueryHandler(help_tips_callback, pattern="^help_tips$"))
+    application.add_handler(CallbackQueryHandler(help_menu_callback, pattern="^help_menu$"))
+
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), lambda update, context: progress_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), lambda update, context: tasks_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^❓ How To$"), lambda update, context: how_to_handler(update, context)))
