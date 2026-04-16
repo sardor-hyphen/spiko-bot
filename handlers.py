@@ -2082,7 +2082,7 @@ async def all_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """Catch all callback queries for debugging."""
     query = update.callback_query
     logger.info(f"All callback received: {query.data}")
-    await query.answer()
+    await query.answer(f"Callback received: {query.data}", show_alert=True)
 
 async def how_to_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the How To button - shows interactive help topics."""
