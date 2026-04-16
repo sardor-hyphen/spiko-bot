@@ -1982,7 +1982,7 @@ def setup_handlers(application: Application):
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), lambda update, context: progress_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), lambda update, context: tasks_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^❓ How To$"), lambda update, context: how_to_handler(update, context)))
-    application.add_handler(MessageHandler(filters.Regex("^💳 Buy Credits / Contact Admin$"), lambda update, context: buy_credits_handler(update, context))
+    application.add_handler(MessageHandler(filters.Regex("^💳 Buy Credits / Contact Admin$"), lambda update, context: buy_credits_handler(update, context)))
     
     # Handle text messages for token input (must be last to avoid conflicts)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: message_handler(update, context)))
