@@ -31,6 +31,7 @@ from bot.config import config
 from bot.db import get_db_session, AsyncSessionLocal
 from bot.models import User, Task, TaskAssignment, TaskModule, AssessmentScore, SessionUsage
 from bot.utils import rate_limit, robust_handler
+from bot import features
 
 # Enable logging
 logging.basicConfig(
@@ -2153,6 +2154,10 @@ def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(help_troubleshooting_callback, pattern="^help_troubleshooting$"))
     application.add_handler(CallbackQueryHandler(help_tips_callback, pattern="^help_tips$"))
     application.add_handler(CallbackQueryHandler(help_menu_callback, pattern="^help_menu$"))
+
+    # Assignment notification callbacks from features.py
+    application.add_handler(CallbackQueryHandler(features.assignment_started_callback, pattern="^assignment_started_"))
+    application.add_handler(CallbackQueryHandler(features.assignment_remind_callback, pattern="^assignment_remind_"))
 
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), lambda update, context: progress_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), lambda update, context: tasks_handler(update, context)))

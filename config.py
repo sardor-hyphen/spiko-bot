@@ -22,6 +22,6 @@ class Config:
     # 3. The URL of the Backend API
     BACKEND_API_URL = os.getenv("BACKEND_API_URL", "https://spiko-final-backend.onrender.com/api")
 
-    SECRET_KEY = os.getenv("SECRET_KEY", "speeko-neural-master-key-2024")
+    SECRET_KEY = os.getenv("SECRET_KEY", "speeko-neural-master-key-2026")
 
 config = Config()
