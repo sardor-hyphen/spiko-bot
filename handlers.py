@@ -2153,7 +2153,6 @@ def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(help_troubleshooting_callback, pattern="^help_troubleshooting$"))
     application.add_handler(CallbackQueryHandler(help_tips_callback, pattern="^help_tips$"))
     application.add_handler(CallbackQueryHandler(help_menu_callback, pattern="^help_menu$"))
-    application.add_handler(CallbackQueryHandler(all_callback_handler, pattern=".*"))
 
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), lambda update, context: progress_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), lambda update, context: tasks_handler(update, context)))
