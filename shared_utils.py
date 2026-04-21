@@ -24,7 +24,7 @@ def generate_webapp_url(user, assignment_id: str = None) -> str:
 
     # 1. Prepare the payload (Must match what your Backend JWT logic expects)
     payload = {
-        'user_id': user.id,
+        'telegram_id': user.telegram_id,
         'email': user.email, # Backend might look for this
         'is_teacher': user.is_teacher,
         'is_admin': user.is_admin,

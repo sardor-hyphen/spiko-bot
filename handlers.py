@@ -1589,7 +1589,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Call backend
                 payload = {
-                    'user_id': user.id,
+                    'telegram_id': user.telegram_id,
                     'is_teacher': True,
                     'exp': datetime.utcnow() + timedelta(hours=1)
                 }
