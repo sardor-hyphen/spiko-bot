@@ -77,7 +77,11 @@ async def lifespan(app: FastAPI):
     logger.info(f"Setting webhook to: {webhook_url}")
     
     async def set_webhook():
-        await bot_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        await bot_app.bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
         
     try:
         await retry_async(set_webhook, retries=5)
