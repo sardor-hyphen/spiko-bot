@@ -31,6 +31,7 @@ from bot.config import config
 from bot.db import get_db_session, AsyncSessionLocal
 from bot.models import User, Task, TaskAssignment, TaskModule, AssessmentScore, SessionUsage
 from bot.utils import rate_limit, robust_handler
+from bot.shared_utils import generate_webapp_url
 
 # Enable logging
 logging.basicConfig(
@@ -106,33 +107,7 @@ async def create_or_update_user(session, telegram_user, role=None):
     await session.refresh(user)
     return user
 
-def generate_webapp_url(user: User, assignment_id: str = None) -> str:
-    """
-    Generates the Web App URL with a JWT token that the Backend trusts.
-    Optional assignment_id can be passed to deep link to a specific task.
-    """
-    # 1. Prepare the payload (Must match what your Backend JWT logic expects)
-    payload = {
-        'user_id': user.id,
-        'email': user.email, # Backend might look for this
-        'is_teacher': user.is_teacher,
-        'is_admin': user.is_admin,
-        'exp': datetime.utcnow() + timedelta(days=1), # Long expiry for convenience
-        'iat': datetime.utcnow()
-    }
-
-    # 2. Sign it using the Shared Secret
-    token = jwt.encode(payload, config.SECRET_KEY, algorithm='HS256')
-
-    # 3. CRITICAL: Send to root "/" NOT "/login"
-    # This triggers the automatic redirection logic in App.tsx
-    url = f"{config.FRONTEND_URL}/?token={token}&provider=telegram"
-
-    # 4. Append assignment_id if provided for deep linking
-    if assignment_id:
-        url += f"&assignment={assignment_id}"
-
-    return url
+# Use the shared utility function instead of duplicating code
 
 # --- Handlers ---
 
@@ -1484,7 +1459,7 @@ async def _call_backend_token_generation(query, user: User, config_data: dict):
     try:
         # Get JWT token for backend authentication
         payload = {
-            'user_id': user.id,
+            'telegram_id': user.telegram_id,
             'is_teacher': True,
             'exp': datetime.utcnow() + timedelta(hours=1)
         }
@@ -1625,7 +1600,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             try:
                 payload = {
-                    'user_id': user.id,
+                    'telegram_id': user.telegram_id,
                     'is_teacher': False,
                     'exp': datetime.utcnow() + timedelta(hours=1)
                 }
@@ -2082,7 +2057,7 @@ async def all_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """Catch all callback queries for debugging."""
     query = update.callback_query
     logger.info(f"All callback received: {query.data}")
-    await query.answer(f"Callback received: {query.data}", show_alert=True)
+    await query.answer(f"Debug: {query.data}", show_alert=True)
 
 async def how_to_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the How To button - shows interactive help topics."""
@@ -2154,10 +2129,13 @@ def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(help_tips_callback, pattern="^help_tips$"))
     application.add_handler(CallbackQueryHandler(help_menu_callback, pattern="^help_menu$"))
 
+    # Catch-all handler for debugging (must be last)
+    application.add_handler(CallbackQueryHandler(all_callback_handler, pattern="^.*$"))
+
     application.add_handler(MessageHandler(filters.Regex("^📊 Progress$"), lambda update, context: progress_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^📝 Tasks$"), lambda update, context: tasks_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^❓ How To$"), lambda update, context: how_to_handler(update, context)))
     application.add_handler(MessageHandler(filters.Regex("^💳 Buy Credits / Contact Admin$"), lambda update, context: buy_credits_handler(update, context)))
-    
+
     # Handle text messages for token input (must be last to avoid conflicts)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: message_handler(update, context)))
