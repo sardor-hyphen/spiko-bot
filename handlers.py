@@ -239,16 +239,16 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, use
     inline_reply_markup = InlineKeyboardMarkup(quick_access_keyboard) if quick_access_keyboard else None
 
     if update.message:
+        # Always send reply keyboard so persistent buttons appear under text input.
+        await update.message.reply_text(msg, reply_markup=reply_markup)
+        # Send inline quick actions as a separate message.
         if inline_reply_markup:
-            await update.message.reply_text(msg, reply_markup=inline_reply_markup)
-        else:
-            await update.message.reply_text(msg, reply_markup=reply_markup)
+            await update.message.reply_text("Quick actions:", reply_markup=inline_reply_markup)
     elif update.callback_query:
-        # If coming from callback, we need to send a new message
+        # If coming from callback, send both keyboard types as separate messages.
+        await context.bot.send_message(chat_id=user.telegram_id, text=msg, reply_markup=reply_markup)
         if inline_reply_markup:
-            await context.bot.send_message(chat_id=user.telegram_id, text=msg, reply_markup=inline_reply_markup)
-        else:
-            await context.bot.send_message(chat_id=user.telegram_id, text=msg, reply_markup=reply_markup)
+            await context.bot.send_message(chat_id=user.telegram_id, text="Quick actions:", reply_markup=inline_reply_markup)
 
 @robust_handler
 @rate_limit
