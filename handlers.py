@@ -227,13 +227,13 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, use
     quick_access_keyboard = []
     if user.is_teacher:
         quick_access_keyboard = [
-            [InlineKeyboardButton("📊 Quick Class Stats", callback_data="quick_class_stats")],
-            [InlineKeyboardButton("⚙️ Account Settings", callback_data="quick_settings")]
+            [InlineKeyboardButton("Quick Class Stats", callback_data="quick_class_stats")],
+            [InlineKeyboardButton("Account Settings", callback_data="quick_settings")]
         ]
     else:
         quick_access_keyboard = [
-            [InlineKeyboardButton("📈 My Progress", callback_data="quick_student_progress")],
-            [InlineKeyboardButton("⚙️ Account Settings", callback_data="quick_settings")]
+            [InlineKeyboardButton("My Progress", callback_data="quick_student_progress")],
+            [InlineKeyboardButton("Account Settings", callback_data="quick_settings")]
         ]
 
     inline_reply_markup = InlineKeyboardMarkup(quick_access_keyboard) if quick_access_keyboard else None
@@ -277,10 +277,9 @@ async def switch_role_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            f"🔄 **Role Switching**\n\n"
-            f"You are currently a **{current_role}**.\n"
+            f"Role Switching\n\n"
+            f"You are currently a {current_role}.\n"
             f"Choose your new role below:",
-            parse_mode='Markdown',
             reply_markup=reply_markup
         )
 
