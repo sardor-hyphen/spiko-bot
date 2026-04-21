@@ -809,22 +809,26 @@ async def task_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def confirm_switch_teacher_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Confirms switching to teacher role."""
     query = update.callback_query
+    logger.info(f"DEBUG: confirm_switch_teacher_callback called with data: {query.data}")
     await query.answer()
 
     telegram_user = query.from_user
     async for session in get_db_session():
         user = await get_user_by_telegram_id(session, telegram_user.id)
         if not user:
+            logger.error(f"DEBUG: User not found for telegram_id: {telegram_user.id}")
             await query.edit_message_text("❌ User not found.")
             return
 
         if user.is_teacher:
+            logger.info(f"DEBUG: User {user.id} is already a teacher")
             await query.edit_message_text("✅ You are already a Teacher!")
             return
 
         # Switch role
         user.is_teacher = True
         await session.commit()
+        logger.info(f"DEBUG: User {user.id} role switched to teacher")
 
         msg = f"✅ **Role Successfully Changed!**\n\n"
         msg += f"You are now a **Teacher** 👨‍🏫\n\n"
@@ -2056,7 +2060,8 @@ async def help_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def all_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Catch all callback queries for debugging."""
     query = update.callback_query
-    logger.info(f"All callback received: {query.data}")
+    logger.info(f"DEBUG: All callback handler triggered with data: {query.data}")
+    logger.info(f"DEBUG: User: {query.from_user.id} ({query.from_user.username})")
     await query.answer(f"Debug: {query.data}", show_alert=True)
 
 async def how_to_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
